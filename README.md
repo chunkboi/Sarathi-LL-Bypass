@@ -30,7 +30,7 @@ The execution flow is as follows:
 
 1. Run the script as Administrator:
    ```bash
-   python patcher.py
+   python master.py
    ```
 2. **The Menu:**
    * **Option 1 (Patch and Deploy):** Automatically clones the target, downloads `pyinstxtractor`, rips the binary apart, injects the JS/Python hooks, repacks it, and deploys it to the installation directory.
