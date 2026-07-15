@@ -2,16 +2,17 @@ def get_hook_code():
     return r"""
 import sys, types, os, tempfile, traceback
 
+# 1. Line-buffered crash log with explicit flush
 try:
     crash_log = os.path.join(tempfile.gettempdir(), 'smartlock_crash.log')
-    sys.stderr = open(crash_log, 'w')
+    sys.stderr = open(crash_log, 'w', buffering=1, encoding='utf-8')
 except Exception:
     pass
 
 def _excepthook(type, value, tb):
     try:
-        with open(os.path.join(tempfile.gettempdir(), 'smartlock_crash.log'), 'w') as f:
-            f.write(''.join(traceback.format_exception(type, value, tb)))
+        traceback.print_exception(type, value, tb, file=sys.stderr)
+        sys.stderr.flush()
     except:
         pass
     sys.__excepthook__(type, value, tb)
@@ -64,19 +65,25 @@ def _safe_get(self, url):
                 Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: false, configurable: true });
                 document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
 
-                // Spoof navigation type
+                // Spoof navigation type (Fixed Proxy using Reflect.get)
                 if (window.performance && performance.getEntriesByType) {
                     const origGetEntries = performance.getEntriesByType.bind(performance);
                     performance.getEntriesByType = function(type) {
                         const entries = origGetEntries(type);
                         if (type === 'navigation' && entries.length > 0) {
-                            return [new Proxy(entries[0], { get(target, prop) { if (prop === 'type') return 'navigate'; return target[prop]; } })];
+                            return [new Proxy(entries[0], {
+                                get(target, prop, receiver) {
+                                    if (prop === 'type') return 'navigate';
+                                    const v = Reflect.get(target, prop, receiver);
+                                    return typeof v === 'function' ? v.bind(target) : v;
+                                }
+                            })];
                         }
                         return entries;
                     };
                 }
 
-                // Fake WebSocket
+                // Fake WebSocket (Removed meme hash fallback)
                 window.WebSocket = class {
                     constructor(url) {
                         this.url = url; this.readyState = 1; this._listeners = {};
@@ -90,13 +97,15 @@ def _safe_get(self, url):
                             const parsed = JSON.parse(data);
                             if (parsed.type === 'Authentication') {
                                 setTimeout(() => {
-                                    let hashToSend = "";
-                                    if (typeof window.SHA256 === 'function' && typeof serverToken !== 'undefined') hashToSend = window.SHA256(serverToken);
-                                    else hashToSend = "5994471abb01112afcc18159f6cc74b4f511b99806da59b3caf5a9c173cacfc5";
-                                    const fakeSuccess = { "type": "Authentication", "token_hash": hashToSend, "userid": parsed.userid || "12345" };
-                                    const msgEvent = new MessageEvent('message', { data: JSON.stringify(fakeSuccess) });
-                                    if (this.onmessage) this.onmessage(msgEvent);
-                                    if (this._listeners['message']) this._listeners['message'].forEach(l => l(msgEvent));
+                                    if (typeof window.SHA256 === 'function' && typeof serverToken !== 'undefined') {
+                                        const hashToSend = window.SHA256(serverToken);
+                                        const fakeSuccess = { "type": "Authentication", "token_hash": hashToSend, "userid": parsed.userid || "12345" };
+                                        const msgEvent = new MessageEvent('message', { data: JSON.stringify(fakeSuccess) });
+                                        if (this.onmessage) this.onmessage(msgEvent);
+                                        if (this._listeners['message']) this._listeners['message'].forEach(l => l(msgEvent));
+                                    } else {
+                                        console.error('[Bypass] serverToken or SHA256 missing. Hard failing.');
+                                    }
                                 }, 50);
                             }
                         } catch (e) {}
@@ -106,10 +115,10 @@ def _safe_get(self, url):
                     removeEventListener() {}
                 };
 
-                // Gut webcam and AI
+                // Gut webcam and AI (Fixed base64 whitespace)
                 window.videoload = function() {};
                 window.loadModels = function() { isModelsLoaded = true; return Promise.resolve(); };
-                const dummyPhoto = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEA AQABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAr/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AKgABf/Z";
+                const dummyPhoto = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAAQABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAr/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AKgABf/Z";
                 const fakeAware = {
                     start: function(base64Image) { return new Promise(function(resolve) { setTimeout(function() { resolve({ isMatch: true, message: 'Validation is in process...', nextExp: '', photo: base64Image || dummyPhoto }); }, 100); }); },
                     match: function() { return new Promise(function(resolve) { resolve({ isMatch: true, message: 'Validation is in process...', nextExp: '', photo: dummyPhoto }); }); },
@@ -119,7 +128,7 @@ def _safe_get(self, url):
                 };
                 Object.defineProperty(window, 'aware', { value: fakeAware, writable: false, configurable: false });
 
-                // DISABLE ALL PROTECTIONS (Right-click, Copy, Paste, Shortcuts)
+                // DISABLE ALL PROTECTIONS
                 document.oncontextmenu = null;
                 document.ondragstart = null;
                 document.onselectstart = null;
@@ -127,7 +136,6 @@ def _safe_get(self, url):
                 document.onkeypress = null;
                 document.onkeyup = null;
                 
-                // Intercept and neutralize protection events at the capture phase
                 document.addEventListener('contextmenu', function(e) { e.stopImmediatePropagation(); }, true);
                 document.addEventListener('selectstart', function(e) { e.stopImmediatePropagation(); }, true);
                 document.addEventListener('copy', function(e) { e.stopImmediatePropagation(); }, true);
@@ -137,7 +145,6 @@ def _safe_get(self, url):
                 document.addEventListener('keyup', function(e) { e.stopImmediatePropagation(); }, true);
                 document.addEventListener('keypress', function(e) { e.stopImmediatePropagation(); }, true);
                 
-                // Wait for jQuery to load, then unbind its restrictions
                 function unbindJQ() {
                     if (typeof jQuery !== 'undefined') {
                         jQuery(document).off('contextmenu');
@@ -150,7 +157,6 @@ def _safe_get(self, url):
                 }
                 unbindJQ();
 
-                // Highlight correct answer
                 function _highlightCorrectAnswer() {
                     var form = document.StallExam || document.getElementById('examform');
                     if (!form || !form.confirm) return;
@@ -194,10 +200,9 @@ def _safe_get(self, url):
         })
     except Exception:
         pass
-    try:
-        _orig_get(self, url)
-    except Exception as nav_ex:
-        print("Navigation error suppressed:", nav_ex)
+    
+    # 2. Stop swallowing navigation errors. Let it propagate so _patched_open_browser handles it cleanly.
+    _orig_get(self, url)
 
 _Chrome.get = _safe_get
 
