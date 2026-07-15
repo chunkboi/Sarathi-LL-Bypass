@@ -17,7 +17,7 @@ The execution flow is as follows:
 ## ⚙️ Prerequisites & Setup
 
 
-1. **Exact Python Version Match:** You MUST run this script with the exact same Python minor version that compiled `Smartlock.exe`.  **USE PYTHON 3.11*
+1. **Exact Python Version Match:** You MUST run this script with the exact same Python minor version that compiled `Smartlock.exe`.  **USE PYTHON 3.11**
 2. **Required Libraries:**
    ```bash
    pip install bytecode
