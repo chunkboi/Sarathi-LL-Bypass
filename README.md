@@ -1,40 +1,216 @@
 # Sarathi-LL-Bypass
 A modular framework for dynamically extracting, patching, and repacking Smartlock.exe. Features automated bytecode hook injection, Selenium CDP payload delivery, and mathematically sound archive reconstruction.
 
-**WARNING:** This documentation and the associated scripts are strictly for **educational purposes and reverse-engineering research**.
+This project demonstrates techniques for:
 
-## 📌 The Blueprint (What is this?)
+- Extracting PyInstaller executables
+- Modifying Python bytecode (`.pyc`)
+- Injecting runtime hooks
+- Repacking executables while preserving archive integrity
+- Dynamic module discovery
+- Automated deployment and rollback
 
-This script automates the full lifecycle of reverse-engineering a compiled Python executable (specifically a lockdown browser). It doesn't just block a few functions; it fundamentally alters the DNA of the application at runtime. 
-
-The execution flow is as follows:
-1. **Reconnaissance & Extraction:** Locates the target executable and unpacks the PyInstaller archive using `pyinstxtractor`.
-2. **Dynamic Resolution:** Scans the extracted `.pyc` (compiled Python bytecode) files to find the main entry point by looking for specific byte signatures (e.g., `--kiosk`).
-3. **Bytecode Patching (The Scalpel):** Uses Python's `marshal` and `bytecode` libraries to decompile the `.pyc`, strip restrictions, and inject a massive hook payload directly into the AST (Abstract Syntax Tree) / bytecode.
-4. **Binary Repacking:** Recalculates the executable's Table of Contents (TOC) and repacks the injected `.pyc` back into a standalone `.exe` without needing the original source code or PyInstaller.
-5. **Runtime Evasion (CDP Injection):** Injects JavaScript into the embedded Chromium browser via Chrome DevTools Protocol (CDP) to spoof webcams, bypass VM checks, unbind anti-cheat event listeners, and highlight correct answers.
-
-## ⚙️ Prerequisites & Setup
-
-
-1. **Exact Python Version Match:** You MUST run this script with the exact same Python minor version that compiled `Smartlock.exe`.  **USE PYTHON 3.11**
-2. **Required Libraries:**
-   ```bash
-   pip install bytecode
-   ```
-3. **Elevated Privileges:** This script patches files in `C:\Program Files`. It forces UAC elevation via `ctypes.windll.shell32.ShellExecuteW`. Do not run it in a restricted shell.
+> **Disclaimer**
+>
+> This repository is intended solely for educational purposes, reverse engineering research, and understanding Python bytecode manipulation. Ensure you have authorization before modifying or analyzing software that you do not own.
 
 ---
 
-## 🚀 Execution Instructions
+## Features
 
-1. Run the script as Administrator:
-   ```bash
-   python master.py
-   ```
-2. **The Menu:**
-   * **Option 1 (Patch and Deploy):** Automatically clones the target, downloads `pyinstxtractor`, rips the binary apart, injects the JS/Python hooks, repacks it, and deploys it to the installation directory.
-   * **Option 2 (Revert):** Restores the `.bak` file created during patching. Always have a contingency plan.
-   * **Option 3:** Exit.
+- Automatic Smartlock installation detection
+- Dynamic discovery of the application's main Python module
+- Recursive Python bytecode patching
+- Runtime hook injection
+- Automatic PyInstaller archive reconstruction
+- Executable backup and restoration
+- Version-aware `.pyc` handling
+- Dynamic payload loading
+- Automatic cleanup after deployment
 
+---
 
+## Repository Structure
+
+```
+.
+├── master.py                  # Main patching utility
+├── smartlock_supplement.py    # Runtime hook source
+└── README.md
+```
+
+---
+
+## How It Works
+
+```
+Original Smartlock.exe
+        │
+        ▼
+Extract PyInstaller archive
+        │
+        ▼
+Locate target Python module
+        │
+        ▼
+Patch Python bytecode
+        │
+        ▼
+Inject runtime hook
+        │
+        ▼
+Rebuild executable
+        │
+        ▼
+Deploy patched executable
+```
+
+---
+
+## Components
+
+### master.py
+
+Responsible for the complete patching workflow.
+
+Main responsibilities include:
+
+- locating the Smartlock installation
+- downloading required helper scripts
+- extracting the executable
+- identifying the target Python module
+- injecting runtime code
+- rebuilding the executable
+- deployment
+- rollback
+
+---
+
+### smartlock_supplement.py
+
+Provides the runtime hook that is compiled and injected into the target application.
+
+The hook demonstrates runtime monkey-patching techniques such as:
+
+- module replacement
+- function overriding
+- browser automation customization
+- JavaScript injection
+- application initialization hooks
+
+---
+
+## Technical Overview
+
+### Dynamic Module Detection
+
+Instead of assuming a fixed module name, the patcher scans extracted bytecode to locate the application's entry module.
+
+---
+
+### Recursive Bytecode Patching
+
+Every nested Python code object is traversed recursively before rebuilding the modified module.
+
+---
+
+### Runtime Hook Injection
+
+The supplement script is compiled at runtime and inserted at the beginning of the target module's execution.
+
+---
+
+### PyInstaller Archive Repacking
+
+The project rebuilds the executable by:
+
+- parsing the archive cookie
+- rebuilding the table of contents
+- replacing the modified module
+- recalculating offsets
+- writing a new executable
+
+---
+
+## Requirements
+
+- Python 3.11
+- Windows
+- Administrator privileges
+- `bytecode`
+
+Install dependencies:
+
+```bash
+pip install bytecode
+```
+
+---
+
+## Usage
+
+Run:
+
+```bash
+python master.py
+```
+
+The program will automatically:
+
+1. Locate Smartlock
+2. Extract the executable
+3. Patch the target module
+4. Rebuild the executable
+5. Deploy the patched version
+
+---
+
+## Restore Original Version
+
+The original executable is automatically backed up before deployment.
+
+To restore:
+
+```text
+Menu → Revert to Original
+```
+
+---
+
+## Project Highlights
+
+This project demonstrates several advanced reverse engineering concepts:
+
+- Python bytecode editing
+- Runtime monkey patching
+- Executable reconstruction
+- Dynamic code injection
+- PyInstaller internals
+- Binary archive parsing
+- Automated deployment
+
+---
+
+## Limitations
+
+- Windows only
+- Designed for PyInstaller-based applications
+- Requires the correct Python bytecode version
+- Administrator privileges required for deployment
+
+---
+# Disclaimer
+
+This repository is provided **"AS IS"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, non-infringement, or uninterrupted operation.
+
+This project is intended solely for educational, research, software analysis, reverse engineering, interoperability, and security research purposes. Users are solely responsible for ensuring that their use of this software complies with all applicable laws, regulations, contractual obligations, software licenses, and terms of service.
+
+The author does not encourage or endorse unauthorized access, circumvention of security measures, academic dishonesty, or any unlawful activity.
+
+---
+
+## License
+
+This repository is provided for educational and research purposes only.
+
+Users are responsible for ensuring they comply with all applicable laws, software licenses, and terms of service when using or modifying software.
