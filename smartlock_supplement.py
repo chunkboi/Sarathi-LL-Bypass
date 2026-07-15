@@ -1,10 +1,22 @@
 def get_hook_code():
+    """
+    This function returns a string containing raw Python code.
+    The master.py script injects this code directly into the top-level
+    of Smartlock's main module bytecode. When Smartlock runs, this code
+    executes first, modifying the environment before the app's logic begins.
+    """
     return r"""
 import sys, types, os, tempfile, traceback
 
-# 1. Line-buffered crash log with explicit flush
+# ==============================================================================
+# 1. RUNTIME CRASH LOGGING
+# We redirect stderr to a line-buffered file. If the injected hook or the
+# application itself crashes, the traceback will be written here instead of
+# disappearing into the void (since PyInstaller apps usually hide the console).
+# ==============================================================================
 try:
     crash_log = os.path.join(tempfile.gettempdir(), 'smartlock_crash.log')
+    # buffering=1 means line-buffered. encoding='utf-8' prevents char errors.
     sys.stderr = open(crash_log, 'w', buffering=1, encoding='utf-8')
 except Exception:
     pass
@@ -12,19 +24,24 @@ except Exception:
 def _excepthook(type, value, tb):
     try:
         traceback.print_exception(type, value, tb, file=sys.stderr)
-        sys.stderr.flush()
+        sys.stderr.flush() # Force flush immediately on crash
     except:
         pass
     sys.__excepthook__(type, value, tb)
 sys.excepthook = _excepthook
 
+# ==============================================================================
+# 2. WIN32 API SPOOFING
+# Smartlock uses win32gui to detect if it is the foreground window and to
+# hide other windows. We inject fake modules so these calls do nothing.
+# ==============================================================================
 if 'win32gui' in sys.modules:
     _wg = sys.modules['win32gui']
 else:
     _wg = types.ModuleType('win32gui')
     sys.modules['win32gui'] = _wg
-_wg.GetForegroundWindow = lambda: 0
-_wg.ShowWindow = lambda *a, **b: None
+_wg.GetForegroundWindow = lambda: 0 # Always return 0 (fake handle)
+_wg.ShowWindow = lambda *a, **b: None # Swallow window hide/show commands
 
 if 'win32con' in sys.modules:
     _wc = sys.modules['win32con']
@@ -33,39 +50,55 @@ else:
     sys.modules['win32con'] = _wc
 _wc.SW_HIDE = 0
 
+# ==============================================================================
+# 3. SELENIUM KIOSK MODE BYPASS
+# Smartlock attempts to launch Chrome in '--kiosk' mode, locking the screen.
+# We monkey-patch the Options object to silently drop '--kiosk' arguments.
+# ==============================================================================
 from selenium.webdriver.chrome.options import Options as _Opt
 _orig_add_arg = _Opt.add_argument
 def _safe_add_arg(self, arg):
     if 'kiosk' in str(arg).lower():
-        return
+        return # Block kiosk mode
     return _orig_add_arg(self, arg)
 _Opt.add_argument = _safe_add_arg
 
 from selenium.webdriver import Chrome as _Chrome
+# Prevent the app from forcing fullscreen via Selenium commands
 _Chrome.fullscreen_window = lambda self: None
 
+# ==============================================================================
+# 4. JAVASCRIPT PAYLOAD INJECTION (The Core Bypass)
+# We patch Chrome.get(). Before navigating to any URL, we use CDP
+# (Chrome DevTools Protocol) to inject a JS script into the page context.
+# This runs before the webpage's own scripts, allowing us to override protections.
+# ==============================================================================
 _orig_get = _Chrome.get
 def _safe_get(self, url):
     try:
         self.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': '''
+                // --- Block forced closures and alerts ---
                 window.close = function() { console.log('[Bypass] window.close blocked!'); };
                 const _origAlert = window.alert;
                 window.alert = function(msg) {
                     if (typeof msg === 'string' && (msg.includes('DEVTOOLS detected') || msg.includes('Fraudulent activity detected'))) {
                         console.log('[Bypass] Blocked detection alert:', msg);
-                        return;
+                        return; // Suppress anti-cheat alert popups
                     }
                     return _origAlert.apply(this, arguments);
                 };
                 window.logout = function() { console.log('[Bypass] logout() blocked'); };
                 
-                // Blind visibility checks
+                // --- Blind visibility checks ---
+                // The app checks if the tab is hidden (user switching tabs). We force it to visible.
                 Object.defineProperty(document, 'hidden', { value: false, writable: false, configurable: true });
                 Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: false, configurable: true });
                 document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
 
-                // Spoof navigation type (Fixed Proxy using Reflect.get)
+                // --- Spoof navigation type ---
+                // Some sites check performance entries to see if the page was refreshed or navigated to directly.
+                // We proxy the entries to always return type: 'navigate'.
                 if (window.performance && performance.getEntriesByType) {
                     const origGetEntries = performance.getEntriesByType.bind(performance);
                     performance.getEntriesByType = function(type) {
@@ -74,6 +107,8 @@ def _safe_get(self, url):
                             return [new Proxy(entries[0], {
                                 get(target, prop, receiver) {
                                     if (prop === 'type') return 'navigate';
+                                    // CRITICAL FIX: Use Reflect.get to preserve 'this' binding.
+                                    // If we just did target[prop], methods like toJSON would lose context and throw.
                                     const v = Reflect.get(target, prop, receiver);
                                     return typeof v === 'function' ? v.bind(target) : v;
                                 }
@@ -83,10 +118,12 @@ def _safe_get(self, url):
                     };
                 }
 
-                // Fake WebSocket (Removed meme hash fallback)
+                // --- Fake WebSocket (Authentication Bypass) ---
+                // The app connects to a WS server for auth. We fake the server response.
                 window.WebSocket = class {
                     constructor(url) {
                         this.url = url; this.readyState = 1; this._listeners = {};
+                        // Simulate connection open
                         setTimeout(() => {
                             if (this.onopen) this.onopen(new Event('open'));
                             if (this._listeners['open']) this._listeners['open'].forEach(l => l(new Event('open')));
@@ -97,6 +134,8 @@ def _safe_get(self, url):
                             const parsed = JSON.parse(data);
                             if (parsed.type === 'Authentication') {
                                 setTimeout(() => {
+                                    // CRITICAL FIX: Removed the hardcoded "12345" meme hash.
+                                    // If the token isn't present, we hard-fail instead of sending a rejectable hash.
                                     if (typeof window.SHA256 === 'function' && typeof serverToken !== 'undefined') {
                                         const hashToSend = window.SHA256(serverToken);
                                         const fakeSuccess = { "type": "Authentication", "token_hash": hashToSend, "userid": parsed.userid || "12345" };
@@ -115,10 +154,15 @@ def _safe_get(self, url):
                     removeEventListener() {}
                 };
 
-                // Gut webcam and AI (Fixed base64 whitespace)
+                // --- Gut webcam and AI proctoring ---
                 window.videoload = function() {};
                 window.loadModels = function() { isModelsLoaded = true; return Promise.resolve(); };
+                
+                // CRITICAL FIX: Removed the whitespace from the base64 dummy photo.
+                // Some strict decoders fail on whitespace, causing silent corruption.
                 const dummyPhoto = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAAQABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAr/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AKgABf/Z";
+                
+                // Fake the AI awareness object that checks the camera feed
                 const fakeAware = {
                     start: function(base64Image) { return new Promise(function(resolve) { setTimeout(function() { resolve({ isMatch: true, message: 'Validation is in process...', nextExp: '', photo: base64Image || dummyPhoto }); }, 100); }); },
                     match: function() { return new Promise(function(resolve) { resolve({ isMatch: true, message: 'Validation is in process...', nextExp: '', photo: dummyPhoto }); }); },
@@ -128,7 +172,7 @@ def _safe_get(self, url):
                 };
                 Object.defineProperty(window, 'aware', { value: fakeAware, writable: false, configurable: false });
 
-                // DISABLE ALL PROTECTIONS
+                // --- DISABLE ALL PROTECTIONS (Right-click, Copy, Paste, Shortcuts) ---
                 document.oncontextmenu = null;
                 document.ondragstart = null;
                 document.onselectstart = null;
@@ -136,6 +180,7 @@ def _safe_get(self, url):
                 document.onkeypress = null;
                 document.onkeyup = null;
                 
+                // Intercept and neutralize protection events at the capture phase
                 document.addEventListener('contextmenu', function(e) { e.stopImmediatePropagation(); }, true);
                 document.addEventListener('selectstart', function(e) { e.stopImmediatePropagation(); }, true);
                 document.addEventListener('copy', function(e) { e.stopImmediatePropagation(); }, true);
@@ -145,6 +190,7 @@ def _safe_get(self, url):
                 document.addEventListener('keyup', function(e) { e.stopImmediatePropagation(); }, true);
                 document.addEventListener('keypress', function(e) { e.stopImmediatePropagation(); }, true);
                 
+                // Wait for jQuery to load, then unbind its restrictions
                 function unbindJQ() {
                     if (typeof jQuery !== 'undefined') {
                         jQuery(document).off('contextmenu');
@@ -157,14 +203,19 @@ def _safe_get(self, url):
                 }
                 unbindJQ();
 
+                // --- Highlight correct answer ---
                 function _highlightCorrectAnswer() {
                     var form = document.StallExam || document.getElementById('examform');
                     if (!form || !form.confirm) return;
                     if (form.confirm.disabled) return;
+                    
                     var originalSubmit = form.submit;
-                    form.submit = function() {};
+                    form.submit = function() {}; // Temporarily block submit
+                    
                     if (typeof show === 'function') show(0);
                     var correctIndex = -1;
+                    
+                    // Find the green label
                     for (var i = 1; i <= 4; i++) {
                         var lab = document.getElementById('lab' + i);
                         if (lab) {
@@ -174,12 +225,17 @@ def _safe_get(self, url):
                             }
                         }
                     }
-                    form.submit = originalSubmit;
+                    
+                    form.submit = originalSubmit; // Restore submit
+                    
+                    // Ensure radios are clickable
                     for (var i = 1; i <= 4; i++) {
                         var radio = document.getElementById('radio' + i + '' + i);
                         if (radio) { radio.disabled = false; radio.style.visibility = 'visible'; }
                     }
                     if (form.confirm) form.confirm.disabled = false;
+                    
+                    // Auto-select the correct radio button
                     if (correctIndex !== -1) {
                         var correctLab = document.getElementById('lab' + correctIndex);
                         var correctRadio = document.getElementById('radio' + correctIndex + '' + correctIndex);
@@ -201,11 +257,17 @@ def _safe_get(self, url):
     except Exception:
         pass
     
-    # 2. Stop swallowing navigation errors. Let it propagate so _patched_open_browser handles it cleanly.
+    # CRITICAL FIX: Stop swallowing navigation errors. If the network fails,
+    # let the exception propagate so _patched_open_browser catches it cleanly.
     _orig_get(self, url)
 
 _Chrome.get = _safe_get
 
+# ==============================================================================
+# 5. PYTHON CONTROLLER BYPASS
+# Smartlock's controller.py does hardware checks, network locks, and VM detection.
+# We replace all these functions with harmless lambdas.
+# ==============================================================================
 import controller as _c
 _c.is_vm = lambda: False
 _c.is_multiple_display = lambda: False
@@ -219,11 +281,13 @@ _c.disconnect_display = lambda: None
 _c.touchpad_gesture = lambda *a: None
 _c.disable_services = lambda: None
 
+# Spoof hardware identifiers
 _c.get_usb_list = lambda: []
 _c.get_mac = lambda: '00:00:00:00:00:00'
 _c.get_system_ip = lambda: '127.0.0.1'
 _c.get_system_ipv6 = lambda: '::1'
 
+# Patch the browser launcher to handle network failures gracefully
 def _patched_open_browser(driver):
     try:
         _c.driver_g = driver
@@ -237,6 +301,10 @@ def _patched_open_browser(driver):
         _c.generate_error_log(url_ex, '5')
 _c.open_browser = _patched_open_browser
 
+# ==============================================================================
+# 6. REGISTRY EDIT BYPASS
+# Prevent the app from writing to the Windows Registry (blocking task manager, etc)
+# ==============================================================================
 import registry_edit
 registry_edit.Regedit.reg_edit_start = lambda self: True
 registry_edit.Regedit.reg_edit_end = lambda self: True
