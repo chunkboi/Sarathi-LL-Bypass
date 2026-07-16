@@ -25,11 +25,11 @@ except ImportError:
 # ==============================================================================
 # URL to the raw text of your smartlock_supplement.py file
 SUPPLEMENT_URL             = "https://raw.githubusercontent.com/chunkboi/Sarathi-LL-Bypass/refs/heads/main/smartlock_supplement.py"
-SUPPLEMENT_SHA256          = "01aef4015307f639398b8f886B21162092bb97cb0adeddbf94e0b799939f37f"  # set after first trusted download, empty to skip
+SUPPLEMENT_SHA256          = ""  # set after first trusted download, empty to skip
 
 # URL to download PyInstaller Extractor
 PYINSTXTRACTOR_URL         = "https://raw.githubusercontent.com/extremecoders-re/pyinstxtractor/master/pyinstxtractor.py"
-PYINSTXTRACTOR_SHA256      = "94e0b6c9d5151bbeefc7e7452e96e24b396c2dbfcb0348e5f12c4c0865fefe58"  # optional; empty skips check
+PYINSTXTRACTOR_SHA256      = ""  # optional; empty skips check
 
 # ==============================================================================
 # UTILITIES
