@@ -1,18 +1,17 @@
 def get_hook_code():
     """
-    This function returns a string containing raw Python code.
-    The master.py script injects this code directly into the top-level
-    of Smartlock's main module bytecode. When Smartlock runs, this code
-    executes first, modifying the environment before the app's logic begins.
+    This function returns a raw Python string containing the hook code.
+    The master.py patcher injects this string directly into the top-level
+    of Smartlock's main module bytecode.
     """
     return r"""
 import sys, types, os, tempfile, traceback
 
 # ==============================================================================
 # 1. RUNTIME CRASH LOGGING
-# We redirect stderr to a line-buffered file. If the injected hook or the
-# application itself crashes, the traceback will be written here instead of
-# disappearing into the void (since PyInstaller apps usually hide the console).
+# PyInstaller apps usually hide the console. If the injected hook or the app
+# crashes, the error disappears. We redirect stderr to a line-buffered file
+# and install a custom excepthook to force-write tracebacks immediately.
 # ==============================================================================
 try:
     crash_log = os.path.join(tempfile.gettempdir(), 'smartlock_crash.log')
@@ -33,14 +32,15 @@ sys.excepthook = _excepthook
 # ==============================================================================
 # 2. WIN32 API SPOOFING
 # Smartlock uses win32gui to detect if it is the foreground window and to
-# hide other windows. We inject fake modules so these calls do nothing.
+# hide other desktop windows. We inject fake modules into sys.modules so
+# these calls do nothing, preventing the app from locking the desktop.
 # ==============================================================================
 if 'win32gui' in sys.modules:
     _wg = sys.modules['win32gui']
 else:
     _wg = types.ModuleType('win32gui')
     sys.modules['win32gui'] = _wg
-_wg.GetForegroundWindow = lambda: 0 # Always return 0 (fake handle)
+_wg.GetForegroundWindow = lambda: 0 # Always return a fake handle
 _wg.ShowWindow = lambda *a, **b: None # Swallow window hide/show commands
 
 if 'win32con' in sys.modules:
@@ -68,7 +68,7 @@ from selenium.webdriver import Chrome as _Chrome
 _Chrome.fullscreen_window = lambda self: None
 
 # ==============================================================================
-# 4. JAVASCRIPT PAYLOAD INJECTION (The Core Bypass)
+# 4. JAVASCRIPT PAYLOAD INJECTION (The Core Browser Bypass)
 # We patch Chrome.get(). Before navigating to any URL, we use CDP
 # (Chrome DevTools Protocol) to inject a JS script into the page context.
 # This runs before the webpage's own scripts, allowing us to override protections.
@@ -78,7 +78,7 @@ def _safe_get(self, url):
     try:
         self.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
             'source': '''
-                // --- Block forced closures and alerts ---
+                // --- Block forced closures and anti-cheat alerts ---
                 window.close = function() { console.log('[Bypass] window.close blocked!'); };
                 const _origAlert = window.alert;
                 window.alert = function(msg) {
@@ -97,8 +97,8 @@ def _safe_get(self, url):
                 document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
 
                 // --- Spoof navigation type ---
-                // Some sites check performance entries to see if the page was refreshed or navigated to directly.
-                // We proxy the entries to always return type: 'navigate'.
+                // Some sites check performance entries to see if the page was refreshed.
+                // We proxy the entries to always return type: 'navigate' so refreshes are ignored.
                 if (window.performance && performance.getEntriesByType) {
                     const origGetEntries = performance.getEntriesByType.bind(performance);
                     performance.getEntriesByType = function(type) {
@@ -108,7 +108,6 @@ def _safe_get(self, url):
                                 get(target, prop, receiver) {
                                     if (prop === 'type') return 'navigate';
                                     // CRITICAL FIX: Use Reflect.get to preserve 'this' binding.
-                                    // If we just did target[prop], methods like toJSON would lose context and throw.
                                     const v = Reflect.get(target, prop, receiver);
                                     return typeof v === 'function' ? v.bind(target) : v;
                                 }
@@ -119,7 +118,7 @@ def _safe_get(self, url):
                 }
 
                 // --- Fake WebSocket (Authentication Bypass) ---
-                // The app connects to a WS server for auth. We fake the server response.
+                // The app connects to a local WS server for auth. We fake the server response.
                 window.WebSocket = class {
                     constructor(url) {
                         this.url = url; this.readyState = 1; this._listeners = {};
@@ -134,8 +133,7 @@ def _safe_get(self, url):
                             const parsed = JSON.parse(data);
                             if (parsed.type === 'Authentication') {
                                 setTimeout(() => {
-                                    // CRITICAL FIX: Removed the hardcoded "12345" meme hash.
-                                    // If the token isn't present, we hard-fail instead of sending a rejectable hash.
+                                    // CRITICAL FIX: Removed hardcoded meme hash. Use actual token.
                                     if (typeof window.SHA256 === 'function' && typeof serverToken !== 'undefined') {
                                         const hashToSend = window.SHA256(serverToken);
                                         const fakeSuccess = { "type": "Authentication", "token_hash": hashToSend, "userid": parsed.userid || "12345" };
@@ -154,21 +152,32 @@ def _safe_get(self, url):
                     removeEventListener() {}
                 };
 
-                // --- Gut webcam and AI proctoring ---
+                // --- Gut webcam and AI proctoring completely ---
                 window.videoload = function() {};
                 window.loadModels = function() { isModelsLoaded = true; return Promise.resolve(); };
                 
-                // CRITICAL FIX: Removed the whitespace from the base64 dummy photo.
-                // Some strict decoders fail on whitespace, causing silent corruption.
-                const dummyPhoto = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAAQABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAr/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AKgABf/Z";
+                // =======================================================
+                // FIXED PHOTO CONFIGURATION
+                // We bypass the webcam entirely. We send a fixed base64 image
+                // to the server so human auditors see a valid photo.
+                // Paste your raw base64 string between the quotes below.
+                // Do NOT include the "data:image/jpeg;base64," prefix!
+                // =======================================================
+                const USER_PHOTO_B64 = "PASTE_YOUR_BASE64_HERE";
+                const FIXED_PHOTO = "data:image/jpeg;base64," + USER_PHOTO_B64;
                 
-                // Fake the AI awareness object that checks the camera feed
+                // Replace the window.aware object with a stub that instantly passes
+                // all liveness checks and returns our fixed photo.
                 const fakeAware = {
-                    start: function(base64Image) { return new Promise(function(resolve) { setTimeout(function() { resolve({ isMatch: true, message: 'Validation is in process...', nextExp: '', photo: base64Image || dummyPhoto }); }, 100); }); },
-                    match: function() { return new Promise(function(resolve) { resolve({ isMatch: true, message: 'Validation is in process...', nextExp: '', photo: dummyPhoto }); }); },
-                    reStart: function() { return new Promise(function(resolve) { resolve(); }); },
+                    start: async function(base64Image) { 
+                        return { isMatch: true, message: 'Validation is in process, Please Wait ............', nextExp: '', photo: FIXED_PHOTO }; 
+                    },
+                    match: async function() { 
+                        return { isMatch: true, message: 'Validation is in process, Please Wait ............', nextExp: '', photo: FIXED_PHOTO }; 
+                    },
+                    reStart: async function() { return; },
                     stop: function() {}, clearCanvas: function() {},
-                    checkPhotoResolution: function() { return new Promise(function(resolve) { resolve(true); }); }
+                    checkPhotoResolution: async function() { return true; }
                 };
                 Object.defineProperty(window, 'aware', { value: fakeAware, writable: false, configurable: false });
 
@@ -203,55 +212,85 @@ def _safe_get(self, url):
                 }
                 unbindJQ();
 
-                // --- Highlight correct answer ---
-                function _highlightCorrectAnswer() {
+                // --- EXAM ANSWER HIGHLIGHTER (No Auto-Submit) ---
+                // This interval runs constantly to catch new questions loading via AJAX.
+                function setupExamInterceptor() {
                     var form = document.StallExam || document.getElementById('examform');
-                    if (!form || !form.confirm) return;
-                    if (form.confirm.disabled) return;
-                    
+                    // Only run once per form instance to avoid spamming
+                    if (!form || form.dataset.bypassed === 'true') return;
+                    form.dataset.bypassed = 'true'; // Mark this question as processed
+
                     var originalSubmit = form.submit;
-                    form.submit = function() {}; // Temporarily block submit
-                    
+                    // 1. Block auto-submit completely so the timer doesn't skip the question
+                    form.submit = function() { console.log('[Bypass] Auto-submit blocked. Waiting for user click.'); };
+
+                    // 2. Trigger the website's local evaluation/coloring logic
                     if (typeof show === 'function') show(0);
+
+                    // 3. Find which label the website colored Green (Correct Answer)
                     var correctIndex = -1;
-                    
-                    // Find the green label
                     for (var i = 1; i <= 4; i++) {
                         var lab = document.getElementById('lab' + i);
                         if (lab) {
-                            var bg = lab.style.background.toLowerCase();
+                            var bg = (lab.style.background || "").toLowerCase();
                             if (bg.includes('green') || bg.includes('#8ac007') || bg.includes('rgb(138, 192, 7)')) {
                                 correctIndex = i; break;
                             }
                         }
                     }
-                    
-                    form.submit = originalSubmit; // Restore submit
-                    
-                    // Ensure radios are clickable
+
+                    // 4. Re-enable radio buttons so the user can manually click them
                     for (var i = 1; i <= 4; i++) {
                         var radio = document.getElementById('radio' + i + '' + i);
                         if (radio) { radio.disabled = false; radio.style.visibility = 'visible'; }
                     }
                     if (form.confirm) form.confirm.disabled = false;
-                    
-                    // Auto-select the correct radio button
+
+                    // 5. External Highlighter & Manual Submit Restore
                     if (correctIndex !== -1) {
                         var correctLab = document.getElementById('lab' + correctIndex);
                         var correctRadio = document.getElementById('radio' + correctIndex + '' + correctIndex);
+
+                        // Apply a glowing border to the correct label
                         if (correctLab) {
-                            correctLab.style.border = '5px solid #00ff00'; correctLab.style.borderRadius = '10px';
-                            correctLab.style.boxShadow = '0 0 15px #00ff00'; correctLab.style.fontWeight = 'bold'; correctLab.style.color = '#00cc00';
+                            correctLab.style.border = '5px solid #00ff00';
+                            correctLab.style.borderRadius = '10px';
+                            correctLab.style.boxShadow = '0 0 15px #00ff00';
+                            correctLab.style.fontWeight = 'bold';
+                            correctLab.style.color = '#00cc00';
                         }
+
+                        // Add a big floating banner so you can't miss it
+                        var banner = document.createElement('div');
+                        banner.textContent = '✓ CORRECT ANSWER: OPTION ' + correctIndex;
+                        banner.style.cssText = 'position:fixed; top:20px; right:20px; background:#00cc00; color:white; padding:15px; font-size:20px; font-weight:bold; z-index:999999; border-radius:10px; box-shadow:0 0 10px black;';
+                        document.body.appendChild(banner);
+
+                        // Restore submit ONLY when the user interacts with the correct answer
                         if (correctRadio) {
-                            correctRadio.checked = true;
-                            var selectedInput = document.getElementById("selected_answer");
-                            if (selectedInput) selectedInput.value = correctRadio.value;
+                            correctRadio.addEventListener('click', function() {
+                                var selectedInput = document.getElementById("selected_answer");
+                                if (selectedInput) selectedInput.value = correctRadio.value;
+                                form.submit = originalSubmit; // Restore submit
+                                if (banner) banner.remove(); // Remove banner
+                            });
                         }
+                        
+                        // Also restore submit if the user clicks the confirm button manually
+                        if (form.confirm) {
+                            form.confirm.addEventListener('click', function() {
+                                form.submit = originalSubmit;
+                                if (banner) banner.remove();
+                            });
+                        }
+                    } else {
+                        // If no answer was found, restore submit so the user isn't stuck
+                        form.submit = originalSubmit;
                     }
                 }
-                window.addEventListener('load', function() { setTimeout(_highlightCorrectAnswer, 500); });
-                setTimeout(_highlightCorrectAnswer, 500);
+
+                // Check continuously to catch new questions loading via AJAX
+                setInterval(setupExamInterceptor, 500);
             '''
         })
     except Exception:
@@ -281,7 +320,7 @@ _c.disconnect_display = lambda: None
 _c.touchpad_gesture = lambda *a: None
 _c.disable_services = lambda: None
 
-# Spoof hardware identifiers
+# Spoof hardware identifiers so the monitoring loop never detects changes
 _c.get_usb_list = lambda: []
 _c.get_mac = lambda: '00:00:00:00:00:00'
 _c.get_system_ip = lambda: '127.0.0.1'
