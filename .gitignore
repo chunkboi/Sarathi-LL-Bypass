@@ -1,0 +1,55 @@
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.venv-bak/
+.venv-py3/
+.venv-py2/
+.venv-py3.*/**
+.venv-py2.*/**
+.egg-info/
+*.egg-info
+*.egg
+.eggs/
+.eggs-bak/
+.coverage
+htmlcov/
+.coverage.*
+.tox/
+.tox-bak/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# Build and distribution artifacts
+build/
+dist/
+*.tar.gz
+*.whl
+*.zip
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
+*.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+```
