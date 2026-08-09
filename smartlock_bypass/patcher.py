@@ -2,11 +2,14 @@
 Bytecode patching module - modifies Python bytecode to inject hooks.
 """
 
+import sys
 import types
 import marshal
 import importlib.util
 
 from bytecode import Bytecode, Instr
+
+from .utils import format_magic_info
 
 
 def patch_bytecode_recursive(code_obj, hook_code):
@@ -73,8 +76,23 @@ def patch_pyc_file(input_path, output_path, hook_code):
         pyc_magic = header[:4]
         if pyc_magic != current_magic:
             print("\n[-] FATAL: Python version mismatch.")
-            print(f"[-] Application magic: {pyc_magic.hex()}")
-            print(f"[-] Your magic:        {current_magic.hex()}")
+            print(f"[-] Application magic: {format_magic_info(pyc_magic)}")
+            print(f"[-] Your magic:        {format_magic_info(current_magic)}")
+            print("\n[*] Recommendation:")
+            app_version = None
+            your_version = None
+            
+            # Try to get version info
+            from .utils import get_python_version_from_magic
+            app_ver = get_python_version_from_magic(pyc_magic)
+            your_ver = get_python_version_from_magic(current_magic)
+            
+            if app_ver:
+                print(f"   - Application was compiled with Python {app_ver[0]}.{app_ver[1]}")
+            if your_ver:
+                print(f"   - You are running Python {your_ver[0]}.{your_ver[1]}")
+            
+            print(f"   - Install Python {app_ver[0]}.{app_ver[1] if app_ver else 'X.Y'} to match the application")
             sys.exit(1)
         code_obj = marshal.load(f)
 
