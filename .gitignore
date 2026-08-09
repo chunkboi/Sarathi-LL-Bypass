@@ -1,1 +1,24 @@
-Nothing to output - the modified files are only Python source files (.py) which should not be ignored.
+```
+# Python compiled files
+*.pyc
+__pycache__/
+
+# Dependencies
+.venv/
+venv/
+node_modules/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+```
