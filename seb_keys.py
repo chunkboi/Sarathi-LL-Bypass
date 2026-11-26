@@ -36,7 +36,6 @@ DEFUSER_JS = r"""
 (() => {
   'use strict';
 
-  // --- STEALTH UTILITY ---
   const stealth = (fn, name) => {
     const nativeStr = `function ${name}() { [native code] }`;
     Object.defineProperty(fn, 'toString', { value: () => nativeStr, configurable: true, writable: true });
@@ -49,95 +48,8 @@ DEFUSER_JS = r"""
     security: { isScreenCaptureAllowed: () => false, isVirtualMachine: () => false },
     browser: { isRunning: () => true }
   };
-    // 2. BYPASS INTERNET CHECK
-  (function patchInternetCheck() {
-    const patch = (obj) => {
-      if (!obj || typeof obj !== 'object') return;
-      // Check both the instance and its prototype
-      const targets = [obj, Object.getPrototypeOf(obj)];
-      for (const target of targets) {
-        if (target && typeof target.checkRealInternet === 'function' && !target.checkRealInternet.__patched) {
-          // Overwrite the function to instantly return true
-          target.checkRealInternet = stealth(async function() { return true; }, 'checkRealInternet');
-          target.checkRealInternet.__patched = true;
-          console.log('%c[defuser] 🌐 checkRealInternet PATCHED to return true always.', 'color:#0f0;font-weight:bold');
-        }
-      }
-    };
 
-    const origCall = Function.prototype.call;
-    Function.prototype.call = stealth(function (thisArg, ...args) {
-      patch(thisArg);
-      return Reflect.apply(origCall, this, [thisArg, ...args]);
-    }, 'call');
-
-    const origApply = Function.prototype.apply;
-    Function.prototype.apply = stealth(function (thisArg, args) {
-      patch(thisArg);
-      return Reflect.apply(origApply, this, [thisArg, args]);
-    }, 'apply');
-  })();
-  // 3. CRYPTO INTERCEPTOR (Dump Passphrase, Salt, and Payloads)
-  (function interceptCrypto() {
-    if (!window.crypto || !window.crypto.subtle) return;
-
-    // Hook importKey to grab the Passphrase
-    const origImportKey = crypto.subtle.importKey.bind(crypto.subtle);
-    crypto.subtle.importKey = stealth(async function (format, keyData, algorithm, extractable, keyUsages) {
-      if (format === 'raw' && algorithm && algorithm.name === 'PBKDF2') {
-        try {
-          const passphrase = new TextDecoder().decode(keyData);
-          if (!window.__SEB_PASSPHRASE) {
-            window.__SEB_PASSPHRASE = passphrase;
-            console.log('%c[defuser] 🔑 CAPTURED PASSPHRASE:', 'color:#ff0;font-weight:bold;font-size:14px', passphrase);
-          }
-        } catch (e) {}
-      }
-      return origImportKey(format, keyData, algorithm, extractable, keyUsages);
-    }, 'importKey');
-
-    // Hook deriveKey to grab the Salt
-    const origDeriveKey = crypto.subtle.deriveKey.bind(crypto.subtle);
-    crypto.subtle.deriveKey = stealth(async function (algorithm, baseKey, derivedKeyType, extractable, keyUsages) {
-      if (algorithm && algorithm.name === 'PBKDF2' && algorithm.salt) {
-        try {
-          const salt = new TextDecoder().decode(algorithm.salt);
-          if (!window.__SEB_SALT) {
-            window.__SEB_SALT = salt;
-            console.log('%c[defuser] 🧂 CAPTURED SALT:', 'color:#ff0;font-weight:bold;font-size:14px', salt);
-          }
-        } catch (e) {}
-      }
-      return origDeriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages);
-    }, 'deriveKey');
-
-    // Hook encrypt to log outbound plaintext
-    const origEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
-    crypto.subtle.encrypt = stealth(async function (algorithm, key, data) {
-      try {
-        const text = new TextDecoder().decode(data);
-        if (text.includes('{')) {
-          console.log('%c[defuser] 🔒 ENCRYPTING PAYLOAD:', 'color:#f80', JSON.parse(text));
-        }
-      } catch (e) {}
-      return origEncrypt(algorithm, key, data);
-    }, 'encrypt');
-
-    // Hook decrypt to log inbound plaintext
-    const origDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
-    crypto.subtle.decrypt = stealth(async function (algorithm, key, data) {
-      const result = await origDecrypt(algorithm, key, data);
-      try {
-        const text = new TextDecoder().decode(result);
-        if (text.includes('{')) {
-          console.log('%c[defuser] 🔓 DECRYPTED PAYLOAD:', 'color:#0f0', JSON.parse(text));
-        }
-      } catch (e) {}
-      return result;
-    }, 'decrypt');
-  })();
-
-  // 4. EXPOSE ANGULAR COMPONENT (__cmp)
+  // 2. EXPOSE ANGULAR COMPONENT (__cmp)
   (function captureComponent() {
     const check = (thisArg) => {
       if (window.__cmp || !thisArg || typeof thisArg !== 'object') return;
@@ -151,7 +63,6 @@ DEFUSER_JS = r"""
       check(thisArg);
       return Reflect.apply(origCall, this, [thisArg, ...args]);
     }, 'call');
-
     const origApply = Function.prototype.apply;
     Function.prototype.apply = stealth(function (thisArg, args) {
       check(thisArg);
@@ -159,12 +70,29 @@ DEFUSER_JS = r"""
     }, 'apply');
   })();
 
-  // 5. PATCH SERVICES (ONNX & CAMERA)
-  (function patchProctoringServices() {
+  // 3. PATCH ALL SERVICES (Internet Check, ONNX, Camera)
+  (function patchServices() {
     const interval = setInterval(() => {
-      if (window.__cmp && window.__cmp.proctorService && window.__cmp.anti) {
-        clearInterval(interval);
-        
+      if (!window.__cmp) return;
+      
+      // --- A. FORCE INTERNET CHECK TO ALWAYS RETURN TRUE ---
+      if (!window.__cmp.checkRealInternet || !window.__cmp.checkRealInternet.__patched) {
+          window.__cmp.checkRealInternet = stealth(async () => true, 'checkRealInternet');
+          window.__cmp.checkRealInternet.__patched = true;
+          
+          if (window.__cmp.networkService) {
+              window.__cmp.networkService.checkRealInternet = stealth(async () => true, 'checkRealInternet');
+              window.__cmp.networkService.isOnline = true;
+              const netProto = Object.getPrototypeOf(window.__cmp.networkService);
+              if (netProto && netProto.checkRealInternet) {
+                  netProto.checkRealInternet = stealth(async () => true, 'checkRealInternet');
+              }
+          }
+          console.log('%c[defuser] 🌐 checkRealInternet PATCHED to return true always.', 'color:#0f0;font-weight:bold');
+      }
+
+      // --- B. PATCH ONNX & CAMERA ---
+      if (window.__cmp.proctorService && window.__cmp.anti) {
         const proctorProto = Object.getPrototypeOf(window.__cmp.proctorService);
         if (!proctorProto.runProctorSpoofCheck.__patched) {
           proctorProto.runProctorSpoofCheck = stealth(async function () {
@@ -183,10 +111,63 @@ DEFUSER_JS = r"""
           console.log('%c[defuser] 📷 Camera Security bypassed.', 'color:#0f0');
         }
       }
-    }, 500);
+    }, 100);
   })();
 
-  // 6. DEFUSE TIMERS & CONTEXT MENU
+  // 4. CRYPTO INTERCEPTOR
+  (function interceptCrypto() {
+    if (!window.crypto || !window.crypto.subtle) return;
+    try {
+      const origImportKey = crypto.subtle.importKey.bind(crypto.subtle);
+      crypto.subtle.importKey = stealth(async function (format, keyData, algorithm, extractable, keyUsages) {
+        try {
+          if (format === 'raw' && algorithm && algorithm.name === 'PBKDF2') {
+            const passphrase = new TextDecoder().decode(keyData);
+            if (!window.__SEB_PASSPHRASE) {
+              window.__SEB_PASSPHRASE = passphrase;
+              console.log('%c[defuser] 🔑 CAPTURED PASSPHRASE:', 'color:#ff0;font-weight:bold;font-size:14px', passphrase);
+            }
+          }
+        } catch (e) {}
+        return origImportKey(format, keyData, algorithm, extractable, keyUsages);
+      }, 'importKey');
+
+      const origDeriveKey = crypto.subtle.deriveKey.bind(crypto.subtle);
+      crypto.subtle.deriveKey = stealth(async function (algorithm, baseKey, derivedKeyType, extractable, keyUsages) {
+        try {
+          if (algorithm && algorithm.name === 'PBKDF2' && algorithm.salt) {
+            const salt = new TextDecoder().decode(algorithm.salt);
+            if (!window.__SEB_SALT) {
+              window.__SEB_SALT = salt;
+              console.log('%c[defuser] 🧂 CAPTURED SALT:', 'color:#ff0;font-weight:bold;font-size:14px', salt);
+            }
+          }
+        } catch (e) {}
+        return origDeriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages);
+      }, 'deriveKey');
+
+      const origEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+      crypto.subtle.encrypt = stealth(async function (algorithm, key, data) {
+        try {
+          const text = new TextDecoder().decode(data);
+          if (text.includes('{')) console.log('%c[defuser] 🔒 ENCRYPTING PAYLOAD:', 'color:#f80', JSON.parse(text));
+        } catch (e) {}
+        return origEncrypt(algorithm, key, data);
+      }, 'encrypt');
+
+      const origDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+      crypto.subtle.decrypt = stealth(async function (algorithm, key, data) {
+        const result = await origDecrypt(algorithm, key, data);
+        try {
+          const text = new TextDecoder().decode(result);
+          if (text.includes('{')) console.log('%c[defuser] 🔓 DECRYPTED PAYLOAD:', 'color:#0f0', JSON.parse(text));
+        } catch (e) {}
+        return result;
+      }, 'decrypt');
+    } catch (e) {}
+  })();
+
+  // 5. DEFUSE TIMERS & CONTEXT MENU
   (function neutralizeTraps() {
     const hasDebugger = (src) => /\bdebugger\b/.test(src);
     function isAntiDebugFn(fn) {
@@ -201,7 +182,6 @@ DEFUSER_JS = r"""
         return orig.call(this, fn, ...rest);
       }, name);
     }
-
     window.setInterval = wrapTimer(window.setInterval, 'setInterval');
     window.setTimeout  = wrapTimer(window.setTimeout,  'setTimeout');
     window.requestAnimationFrame = wrapTimer(window.requestAnimationFrame, 'requestAnimationFrame');
@@ -214,7 +194,7 @@ DEFUSER_JS = r"""
     }, 'defineProperty');
   })();
 
-  // 7. DEFUSE KEYS & HISTORY & STORAGE
+  // 6. DEFUSE KEYS & HISTORY & STORAGE
   window.addEventListener('keydown', (e) => {
     if ((e.altKey && e.key === 'ArrowLeft') || (e.key === 'Backspace' && !['INPUT', 'TEXTAREA'].includes(e.target?.tagName))) {
       e.stopImmediatePropagation();
@@ -240,7 +220,7 @@ DEFUSER_JS = r"""
     return origGet.call(this, k);
   }, 'getItem');
 
-  // 8. DEFUSE FINGERPRINTS & CAMERA LABELS
+  // 7. DEFUSE FINGERPRINTS & CAMERA LABELS
   try {
     const trackDesc = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'label');
     if (trackDesc && trackDesc.get) {
@@ -253,7 +233,7 @@ DEFUSER_JS = r"""
 
   try { Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true }); } catch {}
 
-  console.log('[defuser] All stealth bypasses active. Waiting for crypto payloads...');
+  console.log('[defuser] All stealth bypasses active. Waiting for __cmp...');
 })();
 """
 # ==============================================================================
