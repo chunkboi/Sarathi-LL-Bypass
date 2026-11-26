@@ -45,7 +45,7 @@ DEFUSER_JS = r"""
 
   // 1. FAKE SEB ENVIRONMENT
   window.SafeExamBrowser = {
-    version: "3.9.0",
+    version: "3.10.0",
     security: { isScreenCaptureAllowed: () => false, isVirtualMachine: () => false },
     browser: { isRunning: () => true }
   };
@@ -723,44 +723,53 @@ def launch_patchright(start_url: str, version: str, config_key: str, browser_key
             channel="chrome",
             headless=False,
             no_viewport=True,
-            user_agent=user_agent
+            user_agent=user_agent,
+            ignore_https_errors=True
         )
         
-        # Inject the Tampermonkey/Defuser JS payload
         context.add_init_script(DEFUSER_JS)
 
-        # DYNAMIC HEADER INJECTION (scoped to exam origin + memoized per URL)
-        parts = urlsplit(start_url)
-        route_pattern = f"{parts.scheme}://{parts.netloc}/**" if parts.scheme and parts.netloc else "**/*"
         header_cache: dict[str, tuple[str, str]] = {}
         _req_hash = request_hash
         _ck = config_key
         _bek = browser_key
 
         def route_handler(route):
-            req_url = route.request.url
-            clean_url = req_url.split("#", 1)[0] if "#" in req_url else req_url
+            if route.request.method == "OPTIONS":
+                origin = route.request.headers.get("origin", "https://sarathi.parivahan.gov.in")
+                route.fulfill(status=204, headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-SafeExamBrowser-ConfigKeyHash, X-SafeExamBrowser-RequestHash",
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS"
+                })
+                return
+
+            clean_url = route.request.url.split("#")[0]
             pair = header_cache.get(clean_url)
             if pair is None:
                 pair = (_req_hash(clean_url, _ck), _req_hash(clean_url, _bek))
                 if len(header_cache) < 512:
                     header_cache[clean_url] = pair
+                    
             headers = dict(route.request.headers)
             headers["X-SafeExamBrowser-ConfigKeyHash"], headers["X-SafeExamBrowser-RequestHash"] = pair
-            route.continue_(headers=headers)
+            
+            try:
+                route.continue_(headers=headers)
+            except Exception:
+                pass
 
-        context.route(route_pattern, route_handler)
+        context.route("https://sarathi.parivahan.gov.in/**", route_handler)
         
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(start_url, wait_until="domcontentloaded")
-            print(f"Launched Chrome via Patchright -> {start_url}")
-            print("[Python] Dynamic RequestHasher and Defuser JS injected.")
+            
             while context.pages:
                 context.pages[0].wait_for_event("close", timeout=0)
         finally:
             context.close()
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("seb", type=Path)
