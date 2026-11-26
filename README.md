@@ -1,216 +1,162 @@
-# Sarathi-LL-Bypass
-A modular framework for dynamically extracting, patching, and repacking Smartlock.exe. Features automated bytecode hook injection, Selenium CDP payload delivery, and mathematically sound archive reconstruction.
+# 🛡️ Sarathi SEB Emulator & Proctoring Defuser
 
-This project demonstrates techniques for:
+![Python Version](https://img.shields.io/badge/Python-3.9%2B-blue)
+![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-- Extracting PyInstaller executables
-- Modifying Python bytecode (`.pyc`)
-- Injecting runtime hooks
-- Repacking executables while preserving archive integrity
-- Dynamic module discovery
-- Automated deployment and rollback
+A standalone, automated Python tool designed to emulate **Safe Exam Browser (SEB)** for reverse-engineering and security research on the Sarathi Parivahan LL Test. 
 
-> **Disclaimer**
->
-> This repository is intended solely for educational purposes, reverse engineering research, and understanding Python bytecode manipulation. Ensure you have authorization before modifying or analyzing software that you do not own.
+It dynamically generates valid SEB integrity keys, intercepts network requests to bypass server-side SEB validation, and injects a stealth JavaScript payload via CDP (Chrome DevTools Protocol) to neutralize client-side anti-debug and proctoring mechanisms.
+
+> **⚠️ DISCLAIMER**  
+> This tool is provided strictly for **educational and security research purposes**. Bypassing exam security mechanisms, altering proctoring data, or cheating on official government examinations is illegal and violates terms of service. The author assumes no liability for any misuse of this software. Do not use this on live exams.
 
 ---
 
-## Features
+## ✨ Features
 
-- Automatic Smartlock installation detection
-- Dynamic discovery of the application's main Python module
-- Recursive Python bytecode patching
-- Runtime hook injection
-- Automatic PyInstaller archive reconstruction
-- Executable backup and restoration
-- Version-aware `.pyc` handling
-- Dynamic payload loading
-- Automatic cleanup after deployment
-
----
-
-## Repository Structure
-
-```
-.
-├── master.py                  # Main patching utility
-├── smartlock_supplement.py    # Runtime hook source
-└── README.md
-```
+- **Native Windows API Hashing:** Utilizes `ctypes` to natively read PE file metadata and Authenticode signatures via `crypt32.dll` and `version.dll` (fast, reliable, no PowerShell spawning).
+- **Multithreaded Tree Fingerprinting:** Computes the SEB installation tree hash in parallel using `ThreadPoolExecutor`.
+- **Smart Caching:** Caches the SEB tree state and `.seb` configuration keys to skip heavy computation on subsequent runs.
+- **Dynamic HTTP Header Injection:** Intercepts every network request via Playwright routing and dynamically calculates the `X-SafeExamBrowser-RequestHash` for the exact URL, bypassing server-side 403 Forbidden errors.
+- **CDP Stealth Injection:** Injects a custom JavaScript payload at `document-start` using `patchright`.
+- **Anti-Debug & Tamper Bypass:** Defeats `debugger` timing traps, `Function.toString()` checks, history traps, and forced logouts.
+- **Proctoring Bypass:** Completely disables the ONNX face-spoofing model and virtual camera detection systems.
+- **Developer Console (`__cmp`):** Exposes the Angular component instance for manual manipulation of questions, answers, and proctoring state.
 
 ---
 
-## How It Works
+## 🛠️ Prerequisites
 
-```
-Original Smartlock.exe
-        │
-        ▼
-Extract PyInstaller archive
-        │
-        ▼
-Locate target Python module
-        │
-        ▼
-Patch Python bytecode
-        │
-        ▼
-Inject runtime hook
-        │
-        ▼
-Rebuild executable
-        │
-        ▼
-Deploy patched executable
-```
+1. **Windows OS:** Required to read the local SEB installation (`seb_x64.dll` and `SafeExamBrowser.exe`).
+2. **Python 3.9+**
+3. **Safe Exam Browser (SEB) Installed:** The script uses your local SEB installation to calculate the correct integrity keys.
+4. **Required Python Packages:**
+   ```bash
+   pip install rncryptor pefile patchright
+   ```
+   *(Note: `patchright` is a stealth-patched version of Playwright, required to bypass advanced browser fingerprinting).*
 
 ---
 
-## Components
+## 🚀 Installation
 
-### master.py
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/sarathi-seb-emulator.git
+   cd sarathi-seb-emulator
+   ```
 
-Responsible for the complete patching workflow.
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-Main responsibilities include:
-
-- locating the Smartlock installation
-- downloading required helper scripts
-- extracting the executable
-- identifying the target Python module
-- injecting runtime code
-- rebuilding the executable
-- deployment
-- rollback
+3. Place your `.seb` exam configuration file in the project directory.
 
 ---
 
-### smartlock_supplement.py
+## 📖 Usage
 
-Provides the runtime hook that is compiled and injected into the target application.
+The script requires a `.seb` configuration file to extract the exam settings and starting URL. 
 
-The hook demonstrates runtime monkey-patching techniques such as:
-
-- module replacement
-- function overriding
-- browser automation customization
-- JavaScript injection
-- application initialization hooks
-
----
-
-## Technical Overview
-
-### Dynamic Module Detection
-
-Instead of assuming a fixed module name, the patcher scans extracted bytecode to locate the application's entry module.
-
----
-
-### Recursive Bytecode Patching
-
-Every nested Python code object is traversed recursively before rebuilding the modified module.
-
----
-
-### Runtime Hook Injection
-
-The supplement script is compiled at runtime and inserted at the beginning of the target module's execution.
-
----
-
-### PyInstaller Archive Repacking
-
-The project rebuilds the executable by:
-
-- parsing the archive cookie
-- rebuilding the table of contents
-- replacing the modified module
-- recalculating offsets
-- writing a new executable
-
----
-
-## Requirements
-
-- Python 3.11
-- Windows
-- Administrator privileges
-- `bytecode`
-
-Install dependencies:
-
+### Basic Launch
 ```bash
-pip install bytecode
+py -3 seb_keys.py exam.seb --launch
 ```
 
----
+### CLI Arguments
+| Argument | Description |
+| :--- | :--- |
+| `seb` | **(Required)** Path to the `.seb` configuration file. |
+| `--launch` | Launch Chrome via Patchright with SEB headers and open the start URL. |
+| `--root` | Manually specify the SEB installation directory (e.g., `"C:\Program Files\SafeExamBrowser"`). |
+| `--password` | Provide a password if the `.seb` file is `pwcc` encrypted. |
+| `--no-cache` | Force the script to recalculate the SEB installation tree hash. |
 
-## Usage
-
-Run:
-
-```bash
-python master.py
-```
-
-The program will automatically:
-
-1. Locate Smartlock
-2. Extract the executable
-3. Patch the target module
-4. Rebuild the executable
-5. Deploy the patched version
-
----
-
-## Restore Original Version
-
-The original executable is automatically backed up before deployment.
-
-To restore:
-
+### Example Output
 ```text
-Menu → Revert to Original
+configKey=4a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b
+browserExamKey=f1e2d3c4b5a6...
+Launched Chrome via Patchright -> https://sarathi.parivahan.gov.in/...
+[Python] Dynamic RequestHasher and Defuser JS injected.
 ```
 
 ---
 
-## Project Highlights
+## 🧠 How It Works
 
-This project demonstrates several advanced reverse engineering concepts:
+The script operates in three distinct phases:
 
-- Python bytecode editing
-- Runtime monkey patching
-- Executable reconstruction
-- Dynamic code injection
-- PyInstaller internals
-- Binary archive parsing
-- Automated deployment
+### 1. Key Extraction & Tree Hashing
+The script scans your local SEB installation and the provided `.seb` file.
+- Extracts the integrity salt from `seb_x64.dll`.
+- Calculates the SHA-256 hash of the SEB installation tree (including PE versions and digital signatures).
+- Decrypts the `.seb` file (handling `gzip`, `plnd`, `pwcc`, `pswd`) to generate the `ConfigKey` and `BrowserExamKey (BEK)`.
 
----
+### 2. Dynamic Network Spoofing
+When Patchright launches Chrome, the script intercepts all outgoing HTTP traffic to the target domain.
+- Real SEB generates a unique `RequestHash` for *every single URL* it requests.
+- The script intercepts the request, strips the URL fragment, calculates `SHA256(URL + BEK)`, and injects the `X-SafeExamBrowser-RequestHash` header before letting the request proceed. This tricks the server into thinking a legitimate SEB client is browsing.
 
-## Limitations
-
-- Windows only
-- Designed for PyInstaller-based applications
-- Requires the correct Python bytecode version
-- Administrator privileges required for deployment
-
----
-# Disclaimer
-
-This repository is provided **"AS IS"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, non-infringement, or uninterrupted operation.
-
-This project is intended solely for educational, research, software analysis, reverse engineering, interoperability, and security research purposes. Users are solely responsible for ensuring that their use of this software complies with all applicable laws, regulations, contractual obligations, software licenses, and terms of service.
-
-The author does not encourage or endorse unauthorized access, circumvention of security measures, academic dishonesty, or any unlawful activity.
+### 3. JavaScript Injection (CDP)
+The script injects a JS payload into the browser context before the page loads.
+- **Stealth Patches:** Overrides `Function.prototype.toString()` to return `[native code]`, hiding the fact that functions have been monkey-patched.
+- **Fake SEB:** Creates a fake `window.SafeExamBrowser` object.
+- **Trap Disabling:** Blocks `debugger` statements in timers, stops storage wipes, and prevents history traps.
+- **ONNX/Camera Killswitch:** Overrides `runProctorSpoofCheck` and `runCameraSecurityCheck` to instantly return clean, passing results without loading the heavy AI models.
 
 ---
 
-## License
+## 💻 Developer Console (`__cmp`)
 
-This repository is provided for educational and research purposes only.
+Because the frontend Angular app is running, the script captures the main component instance and exposes it globally as `window.__cmp`. You can use the DevTools Console (F12) to manipulate the exam.
 
-Users are responsible for ensuring they comply with all applicable laws, software licenses, and terms of service when using or modifying software.
+**Check Proctoring Status:**
+```javascript
+// Returns a fake, clean result instantly
+__cmp.proctorService.runProctorSpoofCheck() 
+
+// Returns a fake, clean result instantly
+__cmp.anti.runCameraSecurityCheck()
+```
+
+**Access Exam Data:**
+```javascript
+// Dump all questions to the console
+__cmp.questions
+
+// Export questions to clipboard (copy to a text file)
+copy(JSON.stringify(__cmp.questions, null, 2))
+
+// View your current selected answers
+__cmp.selectedAnswers
+```
+
+**Trigger Submit:**
+```javascript
+// Force the exam to submit
+__cmp.onFinalSubmit()
+```
+
+---
+
+## 🔧 Troubleshooting
+
+**"Could not locate SEB installation"**
+Pass the root path manually: `--root "C:\Program Files\SafeExamBrowser"`
+
+**403 Forbidden Errors on specific API calls**
+Some backends are strict about URL query strings (`?t=1234`). If you get 403s during the exam, open the script, find `route_handler`, and change:
+`clean_url = req_url.split("#", 1)[0]` to `clean_url = req_url.split("#")[0].split("?")[0]`
+
+**Debugger still pausing execution?**
+If DevTools is open, the browser pauses *before* the script can strip the `debugger` word from the JS. Keep DevTools closed until the page loads, or use the DevTools "Deactivate breakpoints" (Ctrl+F8) immediately upon opening.
+
+**The script is ignoring my `.seb` changes**
+Delete the `.seb_tree_cache.json` file in the same directory, or run with `--no-cache`.
+
+---
+
+## 📄 License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
