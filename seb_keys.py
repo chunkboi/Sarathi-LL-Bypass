@@ -50,21 +50,33 @@ DEFUSER_JS = r"""
     browser: { isRunning: () => true }
   };
     // 2. BYPASS INTERNET CHECK
-  (function bypassInternetCheck() {
-    const origFetch = window.fetch;
-    window.fetch = stealth(async function (input, init) {
-      let url = '';
-      if (typeof input === 'string') url = input;
-      else if (input instanceof Request) url = input.url;
-
-      // Intercept the connectivity check and return a fake success
-      if (url.includes('google.com') || url.includes('gstatic.com') || url.includes('favicon.ico')) {
-        return new Response('', { status: 200, statusText: 'OK', headers: { 'Content-Type': 'image/x-icon' } });
+  (function patchInternetCheck() {
+    const patch = (obj) => {
+      if (!obj || typeof obj !== 'object') return;
+      // Check both the instance and its prototype
+      const targets = [obj, Object.getPrototypeOf(obj)];
+      for (const target of targets) {
+        if (target && typeof target.checkRealInternet === 'function' && !target.checkRealInternet.__patched) {
+          // Overwrite the function to instantly return true
+          target.checkRealInternet = stealth(async function() { return true; }, 'checkRealInternet');
+          target.checkRealInternet.__patched = true;
+          console.log('%c[defuser] 🌐 checkRealInternet PATCHED to return true always.', 'color:#0f0;font-weight:bold');
+        }
       }
-      return origFetch.apply(this, arguments);
-    }, 'fetch');
-  })();
+    };
 
+    const origCall = Function.prototype.call;
+    Function.prototype.call = stealth(function (thisArg, ...args) {
+      patch(thisArg);
+      return Reflect.apply(origCall, this, [thisArg, ...args]);
+    }, 'call');
+
+    const origApply = Function.prototype.apply;
+    Function.prototype.apply = stealth(function (thisArg, args) {
+      patch(thisArg);
+      return Reflect.apply(origApply, this, [thisArg, args]);
+    }, 'apply');
+  })();
   // 3. CRYPTO INTERCEPTOR (Dump Passphrase, Salt, and Payloads)
   (function interceptCrypto() {
     if (!window.crypto || !window.crypto.subtle) return;
