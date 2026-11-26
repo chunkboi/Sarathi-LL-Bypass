@@ -49,8 +49,23 @@ DEFUSER_JS = r"""
     security: { isScreenCaptureAllowed: () => false, isVirtualMachine: () => false },
     browser: { isRunning: () => true }
   };
+    // 2. BYPASS INTERNET CHECK
+  (function bypassInternetCheck() {
+    const origFetch = window.fetch;
+    window.fetch = stealth(async function (input, init) {
+      let url = '';
+      if (typeof input === 'string') url = input;
+      else if (input instanceof Request) url = input.url;
 
-  // 2. CRYPTO INTERCEPTOR (Dump Passphrase, Salt, and Payloads)
+      // Intercept the connectivity check and return a fake success
+      if (url.includes('google.com') || url.includes('gstatic.com') || url.includes('favicon.ico')) {
+        return new Response('', { status: 200, statusText: 'OK', headers: { 'Content-Type': 'image/x-icon' } });
+      }
+      return origFetch.apply(this, arguments);
+    }, 'fetch');
+  })();
+
+  // 3. CRYPTO INTERCEPTOR (Dump Passphrase, Salt, and Payloads)
   (function interceptCrypto() {
     if (!window.crypto || !window.crypto.subtle) return;
 
@@ -110,7 +125,7 @@ DEFUSER_JS = r"""
     }, 'decrypt');
   })();
 
-  // 3. EXPOSE ANGULAR COMPONENT (__cmp)
+  // 4. EXPOSE ANGULAR COMPONENT (__cmp)
   (function captureComponent() {
     const check = (thisArg) => {
       if (window.__cmp || !thisArg || typeof thisArg !== 'object') return;
@@ -132,7 +147,7 @@ DEFUSER_JS = r"""
     }, 'apply');
   })();
 
-  // 4. PATCH SERVICES (ONNX & CAMERA)
+  // 5. PATCH SERVICES (ONNX & CAMERA)
   (function patchProctoringServices() {
     const interval = setInterval(() => {
       if (window.__cmp && window.__cmp.proctorService && window.__cmp.anti) {
@@ -159,7 +174,7 @@ DEFUSER_JS = r"""
     }, 500);
   })();
 
-  // 5. DEFUSE TIMERS & CONTEXT MENU
+  // 6. DEFUSE TIMERS & CONTEXT MENU
   (function neutralizeTraps() {
     const hasDebugger = (src) => /\bdebugger\b/.test(src);
     function isAntiDebugFn(fn) {
@@ -187,7 +202,7 @@ DEFUSER_JS = r"""
     }, 'defineProperty');
   })();
 
-  // 6. DEFUSE KEYS & HISTORY & STORAGE
+  // 7. DEFUSE KEYS & HISTORY & STORAGE
   window.addEventListener('keydown', (e) => {
     if ((e.altKey && e.key === 'ArrowLeft') || (e.key === 'Backspace' && !['INPUT', 'TEXTAREA'].includes(e.target?.tagName))) {
       e.stopImmediatePropagation();
@@ -213,7 +228,7 @@ DEFUSER_JS = r"""
     return origGet.call(this, k);
   }, 'getItem');
 
-  // 7. DEFUSE FINGERPRINTS & CAMERA LABELS
+  // 8. DEFUSE FINGERPRINTS & CAMERA LABELS
   try {
     const trackDesc = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'label');
     if (trackDesc && trackDesc.get) {
@@ -713,20 +728,21 @@ def launch_patchright(start_url: str, version: str, config_key: str, browser_key
     except ImportError as exc:
         raise SystemExit("patchright required: pip install patchright") from exc
 
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
     seb_short = ".".join(version.split(".")[:3])
     user_agent = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) SEB/{seb_short} (x64)"
-    profile_dir.mkdir(parents=True, exist_ok=True)
     
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
-            channel="chrome",
             headless=False,
             no_viewport=True,
             user_agent=user_agent,
             ignore_https_errors=True
         )
         
+        # Inject the JS payload (with the internet check bypass)
         context.add_init_script(DEFUSER_JS)
 
         header_cache: dict[str, tuple[str, str]] = {}
@@ -735,6 +751,7 @@ def launch_patchright(start_url: str, version: str, config_key: str, browser_key
         _bek = browser_key
 
         def route_handler(route):
+            # Handle CORS Preflight for Sarathi
             if route.request.method == "OPTIONS":
                 origin = route.request.headers.get("origin", "https://sarathi.parivahan.gov.in")
                 route.fulfill(status=204, headers={
@@ -745,6 +762,7 @@ def launch_patchright(start_url: str, version: str, config_key: str, browser_key
                 })
                 return
 
+            # Inject SEB headers for Sarathi
             clean_url = route.request.url.split("#")[0]
             pair = header_cache.get(clean_url)
             if pair is None:
