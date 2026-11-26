@@ -49,11 +49,51 @@ DEFUSER_JS = r"""
     browser: { isRunning: () => true }
   };
 
-  // 2. EXPOSE ANGULAR COMPONENT (__cmp)
+  // 2. BYPASS INTERNET CHECK (NATIVE FETCH OVERRIDE + FORCE PATCH)
+  (function bypassInternetCheck() {
+    // A. Intercept the network request at the root level
+    const origFetch = window.fetch;
+    window.fetch = stealth(async function (input, init) {
+      let url = typeof input === 'string' ? input : (input?.url || '');
+      if (url.includes('google.com/favicon.ico') || url.includes('gstatic.com') || url.includes('favicon.ico')) {
+        // Return a valid 200 OK response so Angular thinks the internet is perfect
+        return new Response('', { status: 200, statusText: 'OK', headers: { 'Content-Type': 'image/x-icon' } });
+      }
+      return origFetch.apply(this, arguments);
+    }, 'fetch');
+
+    // B. Forcefully overwrite the method on the component and its services
+    const patch = (obj) => {
+      if (!obj || typeof obj !== 'object') return;
+      try {
+        if (obj.checkRealInternet && !obj.checkRealInternet.__patched) {
+          Object.defineProperty(obj, 'checkRealInternet', {
+            value: stealth(async () => true, 'checkRealInternet'),
+            configurable: true,
+            writable: true
+          });
+          obj.checkRealInternet.__patched = true;
+        }
+      } catch (e) {}
+    };
+
+    setInterval(() => {
+      if (window.__cmp) {
+        patch(window.__cmp);
+        if (window.__cmp.networkService) {
+          patch(window.__cmp.networkService);
+          patch(Object.getPrototypeOf(window.__cmp.networkService));
+        }
+        patch(Object.getPrototypeOf(window.__cmp));
+      }
+    }, 50);
+  })();
+
+  // 3. EXPOSE ANGULAR COMPONENT (__cmp)
   (function captureComponent() {
     const check = (thisArg) => {
       if (window.__cmp || !thisArg || typeof thisArg !== 'object') return;
-      if (thisArg.forceLogout || thisArg.onFinalSubmit || thisArg.pollFrame || thisArg.proctorService) {
+      if (thisArg.forceLogout || thisArg.onFinalSubmit || thisArg.pollFrame || thisArg.proctorService || thisArg.checkRealInternet) {
         window.__cmp = thisArg;
         console.log('%c[defuser] 🎯 __cmp CAPTURED!', 'color:#0f0;font-weight:bold');
       }
@@ -70,29 +110,10 @@ DEFUSER_JS = r"""
     }, 'apply');
   })();
 
-  // 3. PATCH ALL SERVICES (Internet Check, ONNX, Camera)
-  (function patchServices() {
+  // 4. PATCH ONNX & CAMERA
+  (function patchProctoringServices() {
     const interval = setInterval(() => {
-      if (!window.__cmp) return;
-      
-      // --- A. FORCE INTERNET CHECK TO ALWAYS RETURN TRUE ---
-      if (!window.__cmp.checkRealInternet || !window.__cmp.checkRealInternet.__patched) {
-          window.__cmp.checkRealInternet = stealth(async () => true, 'checkRealInternet');
-          window.__cmp.checkRealInternet.__patched = true;
-          
-          if (window.__cmp.networkService) {
-              window.__cmp.networkService.checkRealInternet = stealth(async () => true, 'checkRealInternet');
-              window.__cmp.networkService.isOnline = true;
-              const netProto = Object.getPrototypeOf(window.__cmp.networkService);
-              if (netProto && netProto.checkRealInternet) {
-                  netProto.checkRealInternet = stealth(async () => true, 'checkRealInternet');
-              }
-          }
-          console.log('%c[defuser] 🌐 checkRealInternet PATCHED to return true always.', 'color:#0f0;font-weight:bold');
-      }
-
-      // --- B. PATCH ONNX & CAMERA ---
-      if (window.__cmp.proctorService && window.__cmp.anti) {
+      if (window.__cmp && window.__cmp.proctorService && window.__cmp.anti) {
         const proctorProto = Object.getPrototypeOf(window.__cmp.proctorService);
         if (!proctorProto.runProctorSpoofCheck.__patched) {
           proctorProto.runProctorSpoofCheck = stealth(async function () {
@@ -111,10 +132,10 @@ DEFUSER_JS = r"""
           console.log('%c[defuser] 📷 Camera Security bypassed.', 'color:#0f0');
         }
       }
-    }, 100);
+    }, 500);
   })();
 
-  // 4. CRYPTO INTERCEPTOR
+  // 5. CRYPTO INTERCEPTOR
   (function interceptCrypto() {
     if (!window.crypto || !window.crypto.subtle) return;
     try {
@@ -167,7 +188,7 @@ DEFUSER_JS = r"""
     } catch (e) {}
   })();
 
-  // 5. DEFUSE TIMERS & CONTEXT MENU
+  // 6. DEFUSE TIMERS & CONTEXT MENU
   (function neutralizeTraps() {
     const hasDebugger = (src) => /\bdebugger\b/.test(src);
     function isAntiDebugFn(fn) {
@@ -194,7 +215,7 @@ DEFUSER_JS = r"""
     }, 'defineProperty');
   })();
 
-  // 6. DEFUSE KEYS & HISTORY & STORAGE
+  // 7. DEFUSE KEYS & HISTORY & STORAGE
   window.addEventListener('keydown', (e) => {
     if ((e.altKey && e.key === 'ArrowLeft') || (e.key === 'Backspace' && !['INPUT', 'TEXTAREA'].includes(e.target?.tagName))) {
       e.stopImmediatePropagation();
@@ -220,7 +241,7 @@ DEFUSER_JS = r"""
     return origGet.call(this, k);
   }, 'getItem');
 
-  // 7. DEFUSE FINGERPRINTS & CAMERA LABELS
+  // 8. DEFUSE FINGERPRINTS & CAMERA LABELS
   try {
     const trackDesc = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'label');
     if (trackDesc && trackDesc.get) {
