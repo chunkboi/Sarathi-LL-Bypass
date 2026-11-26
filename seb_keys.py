@@ -15,14 +15,12 @@ import os
 import re
 import shlex
 import struct
-import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 from xml.etree.ElementTree import ParseError
 
 DEFAULT_CACHE = Path(__file__).resolve().parent / ".seb_tree_cache.json"
@@ -31,20 +29,21 @@ URL = "https://sarathi.parivahan.gov.in/onlinelltestbnd/exam/sebCheck"
 HEAD_RE = re.compile(r"(<head[^>]*>)", re.IGNORECASE)
 END_SCRIPT_RE = re.compile(r"</script>", re.IGNORECASE)
 
+
+
 # ==============================================================================
 # CDP INJECTED JAVASCRIPT (Stealth Defusers + Fake SEB + __cmp Capturer)
 # ==============================================================================
 DEFUSER_JS = r"""
 (() => {
   'use strict';
-
-  // --- STEALTH UTILITY ---
+// --- STEALTH UTILITY (must come first) ---
   const stealth = (fn, name) => {
     const nativeStr = `function ${name}() { [native code] }`;
     Object.defineProperty(fn, 'toString', { value: () => nativeStr, configurable: true, writable: true });
     return fn;
   };
-  const _origFetch = window.fetch;
+const _origFetch = window.fetch;
  window.fetch = function (input, init) {
   const url = typeof input === "string" ? input : input?.url || "";
   if (url.includes("favicon.ico")) {
@@ -52,7 +51,6 @@ DEFUSER_JS = r"""
   }
   return _origFetch.apply(this, arguments);
 };
-
   // 1. FAKE SEB ENVIRONMENT
   window.SafeExamBrowser = {
     version: "3.10.0",
@@ -62,64 +60,59 @@ DEFUSER_JS = r"""
 
   // 2. CRYPTO INTERCEPTOR (Dump Passphrase, Salt, and Payloads)
   (function interceptCrypto() {
-    if (!window.crypto || !window.crypto.subtle) return;
-
-    // Hook importKey to grab the Passphrase
-    const origImportKey = crypto.subtle.importKey.bind(crypto.subtle);
-    crypto.subtle.importKey = stealth(async function (format, keyData, algorithm, extractable, keyUsages) {
-      if (format === 'raw' && algorithm && algorithm.name === 'PBKDF2') {
-        try {
-          const passphrase = new TextDecoder().decode(keyData);
-          if (!window.__SEB_PASSPHRASE) {
-            window.__SEB_PASSPHRASE = passphrase;
-            console.log('%c[defuser] 🔑 CAPTURED PASSPHRASE:', 'color:#ff0;font-weight:bold;font-size:14px', passphrase);
-          }
-        } catch (e) {}
-      }
-      return origImportKey(format, keyData, algorithm, extractable, keyUsages);
-    }, 'importKey');
-
-    // Hook deriveKey to grab the Salt
-    const origDeriveKey = crypto.subtle.deriveKey.bind(crypto.subtle);
-    crypto.subtle.deriveKey = stealth(async function (algorithm, baseKey, derivedKeyType, extractable, keyUsages) {
-      if (algorithm && algorithm.name === 'PBKDF2' && algorithm.salt) {
-        try {
-          const salt = new TextDecoder().decode(algorithm.salt);
-          if (!window.__SEB_SALT) {
-            window.__SEB_SALT = salt;
-            console.log('%c[defuser] 🧂 CAPTURED SALT:', 'color:#ff0;font-weight:bold;font-size:14px', salt);
-          }
-        } catch (e) {}
-      }
-      return origDeriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages);
-    }, 'deriveKey');
-
-    // Hook encrypt to log outbound plaintext
-    const origEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
-    crypto.subtle.encrypt = stealth(async function (algorithm, key, data) {
-      try {
-        const text = new TextDecoder().decode(data);
-        if (text.includes('{')) {
-          console.log('%c[defuser] 🔒 ENCRYPTING PAYLOAD:', 'color:#f80', JSON.parse(text));
-        }
-      } catch (e) {}
-      return origEncrypt(algorithm, key, data);
-    }, 'encrypt');
-
-    // Hook decrypt to log inbound plaintext
-    const origDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
-    crypto.subtle.decrypt = stealth(async function (algorithm, key, data) {
-      const result = await origDecrypt(algorithm, key, data);
-      try {
-        const text = new TextDecoder().decode(result);
-        if (text.includes('{')) {
-          console.log('%c[defuser] 🔓 DECRYPTED PAYLOAD:', 'color:#0f0', JSON.parse(text));
-        }
-      } catch (e) {}
-      return result;
-    }, 'decrypt');
-  })();
-
+     if (!window.crypto || !window.crypto.subtle) return;
+ 
+     const origImportKey = crypto.subtle.importKey.bind(crypto.subtle);
+     crypto.subtle.importKey = stealth(async function (format, keyData, algorithm, extractable, keyUsages) {
+       if (format === 'raw' && algorithm && algorithm.name === 'PBKDF2') {
+         try {
+           const passphrase = new TextDecoder().decode(keyData);
+           if (!window.__SEB_PASSPHRASE) {
+             window.__SEB_PASSPHRASE = passphrase;
+             console.log('%c[defuser] 🔑 CAPTURED PASSPHRASE:', 'color:#ff0;font-weight:bold;font-size:14px', passphrase);
+           }
+         } catch (e) {}
+       }
+       return origImportKey(format, keyData, algorithm, extractable, keyUsages);
+     }, 'importKey');
+ 
+     const origDeriveKey = crypto.subtle.deriveKey.bind(crypto.subtle);
+     crypto.subtle.deriveKey = stealth(async function (algorithm, baseKey, derivedKeyType, extractable, keyUsages) {
+       if (algorithm && algorithm.name === 'PBKDF2' && algorithm.salt) {
+         try {
+           const salt = new TextDecoder().decode(algorithm.salt);
+           if (!window.__SEB_SALT) {
+             window.__SEB_SALT = salt;
+             console.log('%c[defuser] 🧂 CAPTURED SALT:', 'color:#ff0;font-weight:bold;font-size:14px', salt);
+           }
+         } catch (e) {}
+       }
+       return origDeriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages);
+     }, 'deriveKey');
+ 
+     const origEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+     crypto.subtle.encrypt = stealth(async function (algorithm, key, data) {
+       try {
+         const text = new TextDecoder().decode(data);
+         if (text.includes('{')) {
+           console.log('%c[defuser] 🔒 ENCRYPTING PAYLOAD:', 'color:#f80', JSON.parse(text));
+         }
+       } catch (e) {}
+       return origEncrypt(algorithm, key, data);
+     }, 'encrypt');
+ 
+     const origDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+     crypto.subtle.decrypt = stealth(async function (algorithm, key, data) {
+       const result = await origDecrypt(algorithm, key, data);
+       try {
+         const text = new TextDecoder().decode(result);
+         if (text.includes('{')) {
+           console.log('%c[defuser] 🔓 DECRYPTED PAYLOAD:', 'color:#0f0', JSON.parse(text));
+         }
+       } catch (e) {}
+       return result;
+     }, 'decrypt');
+   })();
   // 3. EXPOSE ANGULAR COMPONENT (__cmp)
   (function captureComponent() {
     const check = (thisArg) => {
@@ -141,33 +134,34 @@ DEFUSER_JS = r"""
       return Reflect.apply(origApply, this, [thisArg, args]);
     }, 'apply');
   })();
+ 
 
   // 4. PATCH SERVICES (ONNX & CAMERA)
-  (function patchProctoringServices() {
-    const interval = setInterval(() => {
-      if (window.__cmp && window.__cmp.proctorService && window.__cmp.anti) {
-        clearInterval(interval);
-        
-        const proctorProto = Object.getPrototypeOf(window.__cmp.proctorService);
-        if (!proctorProto.runProctorSpoofCheck.__patched) {
-          proctorProto.runProctorSpoofCheck = stealth(async function () {
-            return { finalDecision: true, bufferReady: true, spoofDetected: false, probReal: 1.0 };
-          }, 'runProctorSpoofCheck');
-          proctorProto.runProctorSpoofCheck.__patched = true;
-          console.log('%c[defuser] 🧠 ONNX Proctor bypassed.', 'color:#0f0');
-        }
-
-        const antiProto = Object.getPrototypeOf(window.__cmp.anti);
-        if (!antiProto.runCameraSecurityCheck.__patched) {
-          antiProto.runCameraSecurityCheck = stealth(async function () {
-            return { status: "ok", hasVirtualCamera: false, hasMultipleCameras: false, suspiciousDevices: [], replayLikely: false, browserTampered: false };
-          }, 'runCameraSecurityCheck');
-          antiProto.runCameraSecurityCheck.__patched = true;
-          console.log('%c[defuser] 📷 Camera Security bypassed.', 'color:#0f0');
-        }
-      }
-    }, 500);
-  })();
+   (function patchProctoringServices() {
+     const interval = setInterval(() => {
+       if (window.__cmp && window.__cmp.proctorService && window.__cmp.anti) {
+         clearInterval(interval);
+ 
+         const proctorProto = Object.getPrototypeOf(window.__cmp.proctorService);
+         if (!proctorProto.runProctorSpoofCheck.__patched) {
+           proctorProto.runProctorSpoofCheck = stealth(async function () {
+             return { finalDecision: true, bufferReady: true, spoofDetected: false, probReal: 1.0 };
+           }, 'runProctorSpoofCheck');
+           proctorProto.runProctorSpoofCheck.__patched = true;
+           console.log('%c[defuser] 🧠 ONNX Proctor bypassed.', 'color:#0f0');
+         }
+ 
+         const antiProto = Object.getPrototypeOf(window.__cmp.anti);
+         if (!antiProto.runCameraSecurityCheck.__patched) {
+           antiProto.runCameraSecurityCheck = stealth(async function () {
+             return { status: "ok", hasVirtualCamera: false, hasMultipleCameras: false, suspiciousDevices: [], replayLikely: false, browserTampered: false };
+           }, 'runCameraSecurityCheck');
+           antiProto.runCameraSecurityCheck.__patched = true;
+           console.log('%c[defuser] 📷 Camera Security bypassed.', 'color:#0f0');
+         }
+       }
+     }, 500);
+   })();
 
   // 5. DEFUSE TIMERS & CONTEXT MENU
   (function neutralizeTraps() {
@@ -189,7 +183,7 @@ DEFUSER_JS = r"""
     window.setTimeout  = wrapTimer(window.setTimeout,  'setTimeout');
     window.requestAnimationFrame = wrapTimer(window.requestAnimationFrame, 'requestAnimationFrame');
     window.addEventListener('contextmenu', (e) => e.stopImmediatePropagation(), { capture: true });
-    
+
     const origDP = Object.defineProperty;
     Object.defineProperty = stealth(function (obj, key, desc) {
       if (key === 'id' && desc && typeof desc.get === 'function' && obj instanceof Image) return obj;
@@ -224,17 +218,60 @@ DEFUSER_JS = r"""
   }, 'getItem');
 
   // 7. DEFUSE FINGERPRINTS & CAMERA LABELS
+   try {
+     const trackDesc = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'label');
+     if (trackDesc && trackDesc.get) {
+       Object.defineProperty(MediaStreamTrack.prototype, 'label', {
+         get: stealth(function () { return 'Integrated Webcam'; }, 'get'),
+         configurable: true
+       });
+     }
+   } catch {}
+ 
+   try { Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true }); } catch {}
+
+
+  // 8. Neutralize WebGPU / WebNN availability for isolated testing
   try {
-    const trackDesc = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'label');
-    if (trackDesc && trackDesc.get) {
-      Object.defineProperty(MediaStreamTrack.prototype, 'label', {
-        get: stealth(function () { return 'Integrated Webcam'; }, 'get'),
-        configurable: true
-      });
-    }
+    Object.defineProperty(navigator, 'gpu', { value: undefined, configurable: true });
+  } catch {}
+  try {
+    Object.defineProperty(navigator, 'ml', { value: undefined, configurable: true });
   } catch {}
 
-  try { Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true }); } catch {}
+  // 9. Stub heavy ML constructors cleanly without background intervals
+  const noopAsync = async () => {};
+  const makeStub = (name) =>
+    stealth(function () {
+      log('stub-ctor', name);
+      return {
+        setOptions: () => {},
+        onResults: () => {},
+        initialize: noopAsync,
+        reset: () => {},
+        send: noopAsync,
+        close: noopAsync,
+      };
+    }, name);
+
+  for (const clsName of ['Solution', 'FaceMesh']) {
+    if (typeof globalThis[clsName] === 'function') {
+      try {
+        globalThis[clsName] = makeStub(clsName);
+      } catch {}
+    }
+  }
+
+  // . Disable CSS animations/transitions to reduce frame/repaint noise during tests
+  const style = document.createElement('style');
+  style.id = 'test-defuser-no-anim';
+  style.textContent = `
+    *, *::before, *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+  `;
+  (document.head || document.documentElement).appendChild(style);
 
   console.log('[defuser] All stealth bypasses active. Waiting for crypto payloads...');
 })();
@@ -308,16 +345,20 @@ def detect_seb_root() -> Path:
 
 def _find_seb_exe(root: Path) -> Path:
     direct = root / "Application" / "SafeExamBrowser.exe"
-    if direct.is_file(): return direct
+    if direct.is_file():
+        return direct
     for match in root.rglob("SafeExamBrowser.exe"):
-        if match.is_file(): return match
+        if match.is_file():
+            return match
     raise FileNotFoundError(f"SafeExamBrowser.exe not found under {root}")
 
 def _find_seb_dll(root: Path) -> Path:
     direct = root / "Application" / "seb_x64.dll"
-    if direct.is_file(): return direct
+    if direct.is_file():
+        return direct
     for match in root.rglob("seb_x64.dll"):
-        if match.is_file(): return match
+        if match.is_file():
+            return match
     raise FileNotFoundError(f"seb_x64.dll not found under {root}")
 
 def extract_salt_const(root: Path) -> str:
@@ -326,7 +367,8 @@ def extract_salt_const(root: Path) -> str:
     pe = pefile.PE(str(dll_path), fast_load=True)
     try:
         text_sec = next((s for s in pe.sections if s.Name.rstrip(b"\x00") == b".text"), None)
-        if text_sec is None: raise ValueError(f".text section not found in {dll_path}")
+        if text_sec is None:
+            raise ValueError(f".text section not found in {dll_path}")
         text_rva = text_sec.VirtualAddress
         text_bytes = text_sec.get_data()
 
@@ -388,7 +430,8 @@ def unpack_container(data: bytes, password: str = "") -> tuple[bytes, str]:
     current = data
     detected_mode = "xml"
     for _ in range(8):
-        if not current: break
+        if not current:
+            break
         stripped = current.lstrip()
         if stripped.startswith((b"<?xml", b"<!DOCTYPE", b"<plist")):
             return stripped, detected_mode
@@ -413,11 +456,13 @@ def _compare_invariant(left: str, right: str) -> int:
         try:
             from ctypes import wintypes
             compare = ctypes.windll.kernel32.CompareStringEx
-            compare.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPCWSTR, ctypes.c_int, wintypes.LPCWSTR, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, wintypes.LPARAM]
+            compare.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPCWSTR, ctypes.c_int, wintypes.LPCWSTR, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.LPARAM]
             compare.restype = ctypes.c_int
             result = compare("", 0, left, len(left), right, len(right), None, None, 0)
-            if result: return result - 2
-        except Exception: pass
+            if result:
+                return result - 2
+        except Exception:
+            pass
     a, b = left.casefold(), right.casefold()
     return (a > b) - (a < b)
 
@@ -429,15 +474,22 @@ def _xml_value(element: ET.Element) -> Any:
         for i in range(0, len(children), 2):
             result[children[i].text or ""] = _xml_value(children[i + 1])
         return result
-    if tag == "array": return [_xml_value(child) for child in element]
-    if tag == "string": return element.text if element.text is not None else None
-    if tag == "integer": return int(element.text or "0")
-    if tag == "real": return float(element.text or "0")
-    if tag in ("true", "false"): return tag == "true"
-    if tag == "data": return base64.b64decode("".join((element.text or "").split()))
+    if tag == "array":
+        return [_xml_value(child) for child in element]
+    if tag == "string":
+        return element.text if element.text is not None else None
+    if tag == "integer":
+        return int(element.text or "0")
+    if tag == "real":
+        return float(element.text or "0")
+    if tag in ("true", "false"):
+        return tag == "true"
+    if tag == "data":
+        return base64.b64decode("".join((element.text or "").split()))
     if tag == "date":
         value = (element.text or "").strip()
-        if value.endswith("Z"): value = value[:-1] + "+00:00"
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
         parsed = dt.datetime.fromisoformat(value)
         return parsed.astimezone() if parsed.tzinfo is not None else parsed
     raise ValueError(f"Unsupported plist element: {tag}")
@@ -446,14 +498,18 @@ def load_settings_xml_bytes(data: bytes) -> dict[str, Any]:
     root = ET.fromstring(data)
     plist = root if root.tag.rsplit("}", 1)[-1] == "plist" else root.find("plist")
     value = _xml_value(plist[0])
-    if not isinstance(value, dict): raise ValueError("Expected root dictionary")
+    if not isinstance(value, dict):
+        raise ValueError("Expected root dictionary")
     return value
 
 def _dotnet_double(value: float) -> str:
-    if math.isnan(value): return "NaN"
-    if math.isinf(value): return "Infinity" if value > 0 else "-Infinity"
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
     text = repr(value)
-    if text.endswith(".0"): text = text[:-2]
+    if text.endswith(".0"):
+        text = text[:-2]
     if "e" in text:
         mantissa, exponent = text.split("e")
         exp = int(exponent)
@@ -466,35 +522,46 @@ def _serializable(value: Any) -> str:
         result = "{"
         for i, key in enumerate(keys):
             item = value[key]
-            if key.casefold() == "originatorversion" or (isinstance(item, dict) and not item): continue
+            if key.casefold() == "originatorversion" or (isinstance(item, dict) and not item):
+                continue
             result += '"' + key + '":' + _serializable(item) + ("," if i < len(keys) - 1 else "")
         return result + "}"
     if isinstance(value, list):
         return "[" + ",".join(_serializable(item) for item in value) + "]"
-    if isinstance(value, (bytes, bytearray)): return '"' + base64.b64encode(value).decode("ascii") + '"'
+    if isinstance(value, (bytes, bytearray)):
+        return '"' + base64.b64encode(value).decode("ascii") + '"'
     if isinstance(value, dt.datetime):
         text = value.isoformat(timespec="microseconds")
         return '"' + text + ('Z' if value.utcoffset() == dt.timedelta(0) else '') + '"'
-    if value is None: return '""'
-    if isinstance(value, bool): return "true" if value else "false"
-    if isinstance(value, int): return str(value)
-    if isinstance(value, float): return _dotnet_double(value)
-    if isinstance(value, str): return '"' + value + '"'
+    if value is None:
+        return '""'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return _dotnet_double(value)
+    if isinstance(value, str):
+        return '"' + value + '"'
     raise TypeError(f"Unsupported type: {type(value)}")
 
 def exam_configuration_key(raw_data: dict[str, Any], purpose: str = "as-is") -> str:
     effective = dict(raw_data)
-    if purpose != "as-is": effective["sebConfigPurpose"] = 0 if purpose == "starting-exam" else 1
+    if purpose != "as-is":
+        effective["sebConfigPurpose"] = 0 if purpose == "starting-exam" else 1
     return hashlib.sha256(_serializable(effective).encode("utf-8")).hexdigest()
 
 def _detect_purpose(mode: str, settings: dict[str, Any]) -> str:
-    if mode == "pwcc": return "configuring-client"
+    if mode == "pwcc":
+        return "configuring-client"
     return "as-is" if "sebConfigPurpose" in settings else "starting-exam"
 
 def _salt_hex(settings: dict[str, Any]) -> str:
     value = settings.get("examKeySalt")
-    if isinstance(value, (bytes, bytearray)): return bytes(value).hex()
-    if isinstance(value, str) and value: return value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    if isinstance(value, str) and value:
+        return value
     raise ValueError("examKeySalt missing")
 
 def _wide_truncated(text: str) -> bytes:
@@ -774,6 +841,8 @@ def launch_patchright(
                 return
 
             clean_url = route.request.url.split("#")[0]
+            url_lower = clean_url.lower()
+
             pair = header_cache.get(clean_url)
             if pair is None:
                 pair = (_req_hash(clean_url, _ck), _req_hash(clean_url, _bek))
@@ -835,16 +904,18 @@ def launch_patchright(
                 context.pages[0].wait_for_event("close", timeout=0)
         finally:
             context.close()
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("seb", type=Path)   
+    parser.add_argument("seb", type=Path)
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--password", default="")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--launch", action="store_true")
     args = parser.parse_args()
 
-    if not args.seb.is_file(): parser.error(f"file not found: {args.seb}")
+    if not args.seb.is_file():
+        parser.error(f"file not found: {args.seb}")
 
     try:
         root = args.root if args.root is not None else detect_seb_root()
@@ -922,7 +993,7 @@ def main() -> int:
 
     print(f"configKey={config_key}")
     print(f"browserExamKey={browser_key}")
-    
+
     if args.launch:
         launch_patchright(start_url, version, config_key, browser_key, DEFAULT_PROFILE_DIR)
     return 0
