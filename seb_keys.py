@@ -53,15 +53,6 @@ DEFUSER_JS = r"""
   return _origFetch.apply(this, arguments);
 };
 
-
-if (!patchTf()) {
-  const _defineProp = Object.defineProperty;
-  // Poll briefly if TF bundle loads dynamically after this script
-  const timer = setInterval(() => {
-    if (patchTf()) clearInterval(timer);
-  }, 50);
-  setTimeout(() => clearInterval(timer), 15000);
-}
   // 1. FAKE SEB ENVIRONMENT
   window.SafeExamBrowser = {
     version: "3.10.0",
