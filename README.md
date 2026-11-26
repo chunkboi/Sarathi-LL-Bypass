@@ -1,162 +1,128 @@
-# 🛡️ Sarathi SEB Emulator & Proctoring Defuser
 
-![Python Version](https://img.shields.io/badge/Python-3.9%2B-blue)
-![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+# 🛡️ Sarathi Parivahan LL Test: SEB Emulator & Proctor Defuser
+
+![Target](https://img.shields.io/badge/Target-Sarathi%20Parivahan-red)
+![Angular](https://img.shields.io/badge/Frontend-Angular%2020-red)
+![ONNX](https://img.shields.io/badge/AI%20Defeated-ONNX%20FaceMesh-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-A standalone, automated Python tool designed to emulate **Safe Exam Browser (SEB)** for reverse-engineering and security research on the Sarathi Parivahan LL Test. 
+A targeted, stealth-automation framework designed to reverse-engineer and emulate Safe Exam Browser (SEB) for the **Sarathi Parivahan Learner's License (LL) Test**. 
 
-It dynamically generates valid SEB integrity keys, intercepts network requests to bypass server-side SEB validation, and injects a stealth JavaScript payload via CDP (Chrome DevTools Protocol) to neutralize client-side anti-debug and proctoring mechanisms.
+It dynamically spoofs the SEB cryptographic handshake to bypass server-side 403 Forbidden errors, and injects a heavily customized CDP (Chrome DevTools Protocol) payload to neutralize the frontend's Angular 20 anti-tamper mechanisms, ONNX AI proctoring, and camera security checks.
 
-> **⚠️ DISCLAIMER**  
-> This tool is provided strictly for **educational and security research purposes**. Bypassing exam security mechanisms, altering proctoring data, or cheating on official government examinations is illegal and violates terms of service. The author assumes no liability for any misuse of this software. Do not use this on live exams.
+> **⚠️ STRICT DISCLAIMER**  
+> This repository is for **security research and educational reverse-engineering only**. Circumventing government exam proctoring, altering ONNX AI verdicts, or spoofing SEB integrity keys on live servers is illegal and violates the IT Act. The author assumes zero liability for misuse. Do not run this against live, production endpoints.
 
 ---
 
-## ✨ Features
+## 🎯 The Target Architecture
 
-- **Native Windows API Hashing:** Utilizes `ctypes` to natively read PE file metadata and Authenticode signatures via `crypt32.dll` and `version.dll` (fast, reliable, no PowerShell spawning).
-- **Multithreaded Tree Fingerprinting:** Computes the SEB installation tree hash in parallel using `ThreadPoolExecutor`.
-- **Smart Caching:** Caches the SEB tree state and `.seb` configuration keys to skip heavy computation on subsequent runs.
-- **Dynamic HTTP Header Injection:** Intercepts every network request via Playwright routing and dynamically calculates the `X-SafeExamBrowser-RequestHash` for the exact URL, bypassing server-side 403 Forbidden errors.
-- **CDP Stealth Injection:** Injects a custom JavaScript payload at `document-start` using `patchright`.
-- **Anti-Debug & Tamper Bypass:** Defeats `debugger` timing traps, `Function.toString()` checks, history traps, and forced logouts.
-- **Proctoring Bypass:** Completely disables the ONNX face-spoofing model and virtual camera detection systems.
-- **Developer Console (`__cmp`):** Exposes the Angular component instance for manual manipulation of questions, answers, and proctoring state.
+Through reverse-engineering the Sarathi Parivahan web app, the following security layers were identified and defeated:
+
+1. **Server-Side SEB Handshake:** The backend validates the `X-SafeExamBrowser-RequestHash` header against `SHA256(RequestURL + BrowserExamKey)`.
+2. **Anti-Debug Traps (`chunk-MNWLHHGD.js`):** A 1-second `setInterval` runs a `debugger;` statement. If the timing delta is >100ms, it assumes DevTools is open and calls `forceLogout()`.
+3. **ONNX AI Proctoring (`chunk-2FCFBNO4.js`):** The `Ku` service loads `facemesh` and a custom classifier. It checks for spoofed faces via `runProctorSpoofCheck()`.
+4. **Camera Security (`Pu` service):** Checks for virtual cameras (OBS, ManyCam), multiple webcams, and frozen video streams (replay attacks).
+5. **Navigation Traps:** Injects `s1_...` dummy `pushState` entries to trap the back button and block Alt+Left/Backspace.
+6. **State Wipes:** On detection, it wipes the `LLTestCacheDB` IndexedDB and clears `sessionStorage`.
+
+---
+
+## 🚀 Features & Exploits
+
+- **`__cmp` Angular 20 Component Hijack:** Angular 20 hides component instances via numeric `__ngContext__` IDs. This script hooks `Function.prototype.call` and `.apply` to magically capture the component instance globally as `window.__cmp`.
+- **Dynamic Header Injection (Bypasses 403s):** Intercepts every Playwright route request, calculates the exact `SHA256(URL + BEK)` for the specific file, and injects the SEB headers.
+- **Total ONNX Bypass:** Overrides the `runProctorSpoofCheck` prototype to instantly return `probReal: 1.0` (LIVE), skipping the heavy AI facemesh computation entirely.
+- **Camera Security Killswitch:** Overrides `runCameraSecurityCheck` to always report zero virtual cameras and zero frozen streams.
+- **Native PE Hashing:** Uses `ctypes` to read `seb_x64.dll` metadata and Authenticode signatures via `crypt32.dll` (no slow PowerShell spawning).
+- **Stealth `.toString()`:** Patches all modified prototype methods to return `[native code]`, blinding Angular's anti-tamper checks.
 
 ---
 
 ## 🛠️ Prerequisites
 
-1. **Windows OS:** Required to read the local SEB installation (`seb_x64.dll` and `SafeExamBrowser.exe`).
+1. **Windows OS** (Required to read the local SEB installation).
 2. **Python 3.9+**
-3. **Safe Exam Browser (SEB) Installed:** The script uses your local SEB installation to calculate the correct integrity keys.
-4. **Required Python Packages:**
+3. **Safe Exam Browser (SEB) Installed** (e.g., `C:\Program Files\SafeExamBrowser`).
+4. **Python Packages:**
    ```bash
    pip install rncryptor pefile patchright
    ```
-   *(Note: `patchright` is a stealth-patched version of Playwright, required to bypass advanced browser fingerprinting).*
-
----
-
-## 🚀 Installation
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/sarathi-seb-emulator.git
-   cd sarathi-seb-emulator
-   ```
-
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Place your `.seb` exam configuration file in the project directory.
+   *(Note: `patchright` is a stealth-patched fork of Playwright required to bypass advanced Chromium fingerprinting).*
 
 ---
 
 ## 📖 Usage
 
-The script requires a `.seb` configuration file to extract the exam settings and starting URL. 
+You must have the `.seb` configuration file provided by the Sarathi portal.
 
-### Basic Launch
+### Standard Launch
 ```bash
 py -3 seb_keys.py exam.seb --launch
 ```
 
 ### CLI Arguments
-| Argument | Description |
+| Flag | Description |
 | :--- | :--- |
-| `seb` | **(Required)** Path to the `.seb` configuration file. |
-| `--launch` | Launch Chrome via Patchright with SEB headers and open the start URL. |
-| `--root` | Manually specify the SEB installation directory (e.g., `"C:\Program Files\SafeExamBrowser"`). |
-| `--password` | Provide a password if the `.seb` file is `pwcc` encrypted. |
-| `--no-cache` | Force the script to recalculate the SEB installation tree hash. |
-
-### Example Output
-```text
-configKey=4a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b
-browserExamKey=f1e2d3c4b5a6...
-Launched Chrome via Patchright -> https://sarathi.parivahan.gov.in/...
-[Python] Dynamic RequestHasher and Defuser JS injected.
-```
+| `seb` | **(Required)** Path to the `.seb` file. |
+| `--launch` | Launches Patchright, injects headers/JS, and opens the exam URL. |
+| `--root` | Manually specify SEB install path (e.g., `--root "D:\SafeExamBrowser"`). |
+| `--password` | Provide a password if the `.seb` is `pwcc` encrypted. |
+| `--no-cache` | Forces re-calculation of the SEB installation tree fingerprint. |
 
 ---
 
-## 🧠 How It Works
+## 🧠 The `__cmp` Developer Console
 
-The script operates in three distinct phases:
+Once the exam page loads, open DevTools (F12). The script will output `[defuser] 🎯 __cmp CAPTURED!`. You now have full control over the Angular component.
 
-### 1. Key Extraction & Tree Hashing
-The script scans your local SEB installation and the provided `.seb` file.
-- Extracts the integrity salt from `seb_x64.dll`.
-- Calculates the SHA-256 hash of the SEB installation tree (including PE versions and digital signatures).
-- Decrypts the `.seb` file (handling `gzip`, `plnd`, `pwcc`, `pswd`) to generate the `ConfigKey` and `BrowserExamKey (BEK)`.
-
-### 2. Dynamic Network Spoofing
-When Patchright launches Chrome, the script intercepts all outgoing HTTP traffic to the target domain.
-- Real SEB generates a unique `RequestHash` for *every single URL* it requests.
-- The script intercepts the request, strips the URL fragment, calculates `SHA256(URL + BEK)`, and injects the `X-SafeExamBrowser-RequestHash` header before letting the request proceed. This tricks the server into thinking a legitimate SEB client is browsing.
-
-### 3. JavaScript Injection (CDP)
-The script injects a JS payload into the browser context before the page loads.
-- **Stealth Patches:** Overrides `Function.prototype.toString()` to return `[native code]`, hiding the fact that functions have been monkey-patched.
-- **Fake SEB:** Creates a fake `window.SafeExamBrowser` object.
-- **Trap Disabling:** Blocks `debugger` statements in timers, stops storage wipes, and prevents history traps.
-- **ONNX/Camera Killswitch:** Overrides `runProctorSpoofCheck` and `runCameraSecurityCheck` to instantly return clean, passing results without loading the heavy AI models.
-
----
-
-## 💻 Developer Console (`__cmp`)
-
-Because the frontend Angular app is running, the script captures the main component instance and exposes it globally as `window.__cmp`. You can use the DevTools Console (F12) to manipulate the exam.
-
-**Check Proctoring Status:**
+### 1. Exfiltrate Questions
+The app caches questions in IndexedDB (`LLTestCacheDB`). You can dump them directly:
 ```javascript
-// Returns a fake, clean result instantly
-__cmp.proctorService.runProctorSpoofCheck() 
+// Dump questions to console
+await __cmp.indexedDb.getExamData()
 
-// Returns a fake, clean result instantly
-__cmp.anti.runCameraSecurityCheck()
+// Copy questions to clipboard as JSON
+copy(JSON.stringify(await __cmp.indexedDb.getExamData(), null, 2))
 ```
 
-**Access Exam Data:**
+### 2. Verify the AI is Dead
+Check that the ONNX models and camera security checks are fully neutralized:
 ```javascript
-// Dump all questions to the console
-__cmp.questions
+// Should instantly return { spoofDetected: false, probReal: 1.0 }
+await __cmp.proctorService.runProctorSpoofCheck(__cmp.videoRef.nativeElement)
 
-// Export questions to clipboard (copy to a text file)
-copy(JSON.stringify(__cmp.questions, null, 2))
-
-// View your current selected answers
-__cmp.selectedAnswers
+// Should instantly return { status: "ok", hasVirtualCamera: false, replayLikely: false }
+await __cmp.anti.runCameraSecurityCheck(null, __cmp.videoRef.nativeElement)
 ```
 
-**Trigger Submit:**
+### 3. Force Submission
+If you want to skip the UI and submit immediately:
 ```javascript
-// Force the exam to submit
 __cmp.onFinalSubmit()
 ```
 
----
-
-## 🔧 Troubleshooting
-
-**"Could not locate SEB installation"**
-Pass the root path manually: `--root "C:\Program Files\SafeExamBrowser"`
-
-**403 Forbidden Errors on specific API calls**
-Some backends are strict about URL query strings (`?t=1234`). If you get 403s during the exam, open the script, find `route_handler`, and change:
-`clean_url = req_url.split("#", 1)[0]` to `clean_url = req_url.split("#")[0].split("?")[0]`
-
-**Debugger still pausing execution?**
-If DevTools is open, the browser pauses *before* the script can strip the `debugger` word from the JS. Keep DevTools closed until the page loads, or use the DevTools "Deactivate breakpoints" (Ctrl+F8) immediately upon opening.
-
-**The script is ignoring my `.seb` changes**
-Delete the `.seb_tree_cache.json` file in the same directory, or run with `--no-cache`.
+### 4. Bypass "Minimum Answer Time"
+The exam enforces `tMinAnsTime` (e.g., 30 seconds) before `canFinalSubmit` becomes true. You can bypass this lock:
+```javascript
+__cmp.canFinalSubmit = true;
+__cmp.cd.detectChanges();
+```
 
 ---
 
-## 📄 License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## 🛡️ How the Defuser Works (Under the Hood)
+
+1. **Bypassing the `debugger` Trap:** 
+   The script hooks `window.setInterval` and inspects the function source. If it contains `debugger;`, it drops the timer completely. It also overrides `Object.defineProperty` to block the console-getter trap on `Image.prototype.id`.
+2. **Defeating the History Trap:**
+   The app calls `pushHistoryBuffer()` which pushes dummy state objects like `{ uid: "s1_1795684725204_jzfcgztcn" }`. The script hooks `History.prototype.pushState` and silently drops any state matching `/^s\d+_\d+_[a-z0-9]+$/i`.
+3. **Frozen Stream Detection Evasion:**
+   The `Pu.detectFrozenStream()` method grabs 5 frames via `getImageData(0,0,64,48)`. The script hooks `CanvasRenderingContext2D.prototype.getImageData` and injects 0-2 random RGB noise pixels into arrays matching `64x48`, ensuring every frame looks unique.
+4. **Storage Wipe Protection:**
+   The `forceLogout()` method calls `sessionStorage.clear()` and `indexedDB.deleteDatabase('LLTestCacheDB')`. The script hooks `Storage.prototype.clear` to back up and restore `examData`, `answers`, and `loginData`. It also fakes a successful IDB deletion.
+
+---
+```
+
+```
