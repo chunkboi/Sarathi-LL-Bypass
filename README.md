@@ -43,7 +43,7 @@ Through reverse-engineering the Sarathi Parivahan web app, the following securit
 
 1. **Windows OS** (Required to read the local SEB installation).
 2. **Python 3.9+**
-3. **Safe Exam Browser (SEB) Installed** (e.g., `C:\Program Files\SafeExamBrowser`).
+3. **Safe Exam Browser (SEB) Installed** (e.g., `C:\Program Files\SafeExamBrowser`). Exact version on the Sarathi Portal
 4. **Python Packages:**
    ```bash
    pip install rncryptor pefile patchright
