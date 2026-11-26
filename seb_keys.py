@@ -28,6 +28,8 @@ from xml.etree.ElementTree import ParseError
 DEFAULT_CACHE = Path(__file__).resolve().parent / ".seb_tree_cache.json"
 DEFAULT_PROFILE_DIR = Path(__file__).resolve().parent / ".seb_chrome_profile"
 URL = "https://sarathi.parivahan.gov.in/onlinelltestbnd/exam/sebCheck"
+HEAD_RE = re.compile(r"(<head[^>]*>)", re.IGNORECASE)
+END_SCRIPT_RE = re.compile(r"</script>", re.IGNORECASE)
 
 # ==============================================================================
 # CDP INJECTED JAVASCRIPT (Stealth Defusers + Fake SEB + __cmp Capturer)
@@ -36,12 +38,30 @@ DEFUSER_JS = r"""
 (() => {
   'use strict';
 
+  // --- STEALTH UTILITY ---
   const stealth = (fn, name) => {
     const nativeStr = `function ${name}() { [native code] }`;
     Object.defineProperty(fn, 'toString', { value: () => nativeStr, configurable: true, writable: true });
     return fn;
   };
+  const _origFetch = window.fetch;
+ window.fetch = function (input, init) {
+  const url = typeof input === "string" ? input : input?.url || "";
+  if (url.includes("favicon.ico")) {
+    return Promise.resolve(new Response("", { status: 200, statusText: "OK" }));
+  }
+  return _origFetch.apply(this, arguments);
+};
 
+
+if (!patchTf()) {
+  const _defineProp = Object.defineProperty;
+  // Poll briefly if TF bundle loads dynamically after this script
+  const timer = setInterval(() => {
+    if (patchTf()) clearInterval(timer);
+  }, 50);
+  setTimeout(() => clearInterval(timer), 15000);
+}
   // 1. FAKE SEB ENVIRONMENT
   window.SafeExamBrowser = {
     version: "3.10.0",
@@ -49,11 +69,71 @@ DEFUSER_JS = r"""
     browser: { isRunning: () => true }
   };
 
-  // 2. EXPOSE ANGULAR COMPONENT (__cmp)
+  // 2. CRYPTO INTERCEPTOR (Dump Passphrase, Salt, and Payloads)
+  (function interceptCrypto() {
+    if (!window.crypto || !window.crypto.subtle) return;
+
+    // Hook importKey to grab the Passphrase
+    const origImportKey = crypto.subtle.importKey.bind(crypto.subtle);
+    crypto.subtle.importKey = stealth(async function (format, keyData, algorithm, extractable, keyUsages) {
+      if (format === 'raw' && algorithm && algorithm.name === 'PBKDF2') {
+        try {
+          const passphrase = new TextDecoder().decode(keyData);
+          if (!window.__SEB_PASSPHRASE) {
+            window.__SEB_PASSPHRASE = passphrase;
+            console.log('%c[defuser] 🔑 CAPTURED PASSPHRASE:', 'color:#ff0;font-weight:bold;font-size:14px', passphrase);
+          }
+        } catch (e) {}
+      }
+      return origImportKey(format, keyData, algorithm, extractable, keyUsages);
+    }, 'importKey');
+
+    // Hook deriveKey to grab the Salt
+    const origDeriveKey = crypto.subtle.deriveKey.bind(crypto.subtle);
+    crypto.subtle.deriveKey = stealth(async function (algorithm, baseKey, derivedKeyType, extractable, keyUsages) {
+      if (algorithm && algorithm.name === 'PBKDF2' && algorithm.salt) {
+        try {
+          const salt = new TextDecoder().decode(algorithm.salt);
+          if (!window.__SEB_SALT) {
+            window.__SEB_SALT = salt;
+            console.log('%c[defuser] 🧂 CAPTURED SALT:', 'color:#ff0;font-weight:bold;font-size:14px', salt);
+          }
+        } catch (e) {}
+      }
+      return origDeriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages);
+    }, 'deriveKey');
+
+    // Hook encrypt to log outbound plaintext
+    const origEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+    crypto.subtle.encrypt = stealth(async function (algorithm, key, data) {
+      try {
+        const text = new TextDecoder().decode(data);
+        if (text.includes('{')) {
+          console.log('%c[defuser] 🔒 ENCRYPTING PAYLOAD:', 'color:#f80', JSON.parse(text));
+        }
+      } catch (e) {}
+      return origEncrypt(algorithm, key, data);
+    }, 'encrypt');
+
+    // Hook decrypt to log inbound plaintext
+    const origDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+    crypto.subtle.decrypt = stealth(async function (algorithm, key, data) {
+      const result = await origDecrypt(algorithm, key, data);
+      try {
+        const text = new TextDecoder().decode(result);
+        if (text.includes('{')) {
+          console.log('%c[defuser] 🔓 DECRYPTED PAYLOAD:', 'color:#0f0', JSON.parse(text));
+        }
+      } catch (e) {}
+      return result;
+    }, 'decrypt');
+  })();
+
+  // 3. EXPOSE ANGULAR COMPONENT (__cmp)
   (function captureComponent() {
     const check = (thisArg) => {
       if (window.__cmp || !thisArg || typeof thisArg !== 'object') return;
-      if (thisArg.forceLogout || thisArg.onFinalSubmit || thisArg.pollFrame || thisArg.proctorService || thisArg.checkRealInternet) {
+      if (thisArg.forceLogout || thisArg.onFinalSubmit || thisArg.pollFrame || thisArg.proctorService) {
         window.__cmp = thisArg;
         console.log('%c[defuser] 🎯 __cmp CAPTURED!', 'color:#0f0;font-weight:bold');
       }
@@ -63,6 +143,7 @@ DEFUSER_JS = r"""
       check(thisArg);
       return Reflect.apply(origCall, this, [thisArg, ...args]);
     }, 'call');
+
     const origApply = Function.prototype.apply;
     Function.prototype.apply = stealth(function (thisArg, args) {
       check(thisArg);
@@ -70,10 +151,12 @@ DEFUSER_JS = r"""
     }, 'apply');
   })();
 
-  // 3. PATCH ONNX & CAMERA
+  // 4. PATCH SERVICES (ONNX & CAMERA)
   (function patchProctoringServices() {
     const interval = setInterval(() => {
       if (window.__cmp && window.__cmp.proctorService && window.__cmp.anti) {
+        clearInterval(interval);
+        
         const proctorProto = Object.getPrototypeOf(window.__cmp.proctorService);
         if (!proctorProto.runProctorSpoofCheck.__patched) {
           proctorProto.runProctorSpoofCheck = stealth(async function () {
@@ -95,59 +178,6 @@ DEFUSER_JS = r"""
     }, 500);
   })();
 
-  // 4. CRYPTO INTERCEPTOR
-  (function interceptCrypto() {
-    if (!window.crypto || !window.crypto.subtle) return;
-    try {
-      const origImportKey = crypto.subtle.importKey.bind(crypto.subtle);
-      crypto.subtle.importKey = stealth(async function (format, keyData, algorithm, extractable, keyUsages) {
-        try {
-          if (format === 'raw' && algorithm && algorithm.name === 'PBKDF2') {
-            const passphrase = new TextDecoder().decode(keyData);
-            if (!window.__SEB_PASSPHRASE) {
-              window.__SEB_PASSPHRASE = passphrase;
-              console.log('%c[defuser] 🔑 CAPTURED PASSPHRASE:', 'color:#ff0;font-weight:bold;font-size:14px', passphrase);
-            }
-          }
-        } catch (e) {}
-        return origImportKey(format, keyData, algorithm, extractable, keyUsages);
-      }, 'importKey');
-
-      const origDeriveKey = crypto.subtle.deriveKey.bind(crypto.subtle);
-      crypto.subtle.deriveKey = stealth(async function (algorithm, baseKey, derivedKeyType, extractable, keyUsages) {
-        try {
-          if (algorithm && algorithm.name === 'PBKDF2' && algorithm.salt) {
-            const salt = new TextDecoder().decode(algorithm.salt);
-            if (!window.__SEB_SALT) {
-              window.__SEB_SALT = salt;
-              console.log('%c[defuser] 🧂 CAPTURED SALT:', 'color:#ff0;font-weight:bold;font-size:14px', salt);
-            }
-          }
-        } catch (e) {}
-        return origDeriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages);
-      }, 'deriveKey');
-
-      const origEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
-      crypto.subtle.encrypt = stealth(async function (algorithm, key, data) {
-        try {
-          const text = new TextDecoder().decode(data);
-          if (text.includes('{')) console.log('%c[defuser] 🔒 ENCRYPTING PAYLOAD:', 'color:#f80', JSON.parse(text));
-        } catch (e) {}
-        return origEncrypt(algorithm, key, data);
-      }, 'encrypt');
-
-      const origDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
-      crypto.subtle.decrypt = stealth(async function (algorithm, key, data) {
-        const result = await origDecrypt(algorithm, key, data);
-        try {
-          const text = new TextDecoder().decode(result);
-          if (text.includes('{')) console.log('%c[defuser] 🔓 DECRYPTED PAYLOAD:', 'color:#0f0', JSON.parse(text));
-        } catch (e) {}
-        return result;
-      }, 'decrypt');
-    } catch (e) {}
-  })();
-
   // 5. DEFUSE TIMERS & CONTEXT MENU
   (function neutralizeTraps() {
     const hasDebugger = (src) => /\bdebugger\b/.test(src);
@@ -163,6 +193,7 @@ DEFUSER_JS = r"""
         return orig.call(this, fn, ...rest);
       }, name);
     }
+
     window.setInterval = wrapTimer(window.setInterval, 'setInterval');
     window.setTimeout  = wrapTimer(window.setTimeout,  'setTimeout');
     window.requestAnimationFrame = wrapTimer(window.requestAnimationFrame, 'requestAnimationFrame');
@@ -214,7 +245,7 @@ DEFUSER_JS = r"""
 
   try { Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true }); } catch {}
 
-  console.log('[defuser] All stealth bypasses active. Waiting for __cmp...');
+  console.log('[defuser] All stealth bypasses active. Waiting for crypto payloads...');
 })();
 """
 # ==============================================================================
@@ -695,28 +726,36 @@ def request_hash(url: str, key_hex: str) -> str:
     url = url.split("#", 1)[0]
     return hashlib.sha256((url + key_hex).encode("utf-8")).hexdigest()
 
-def launch_patchright(start_url: str, version: str, config_key: str, browser_key: str, profile_dir: Path) -> None:
+def launch_patchright(
+    start_url: str,
+    version: str,
+    config_key: str,
+    browser_key: str,
+    profile_dir: Path,
+) -> None:
     try:
         from patchright.sync_api import sync_playwright
     except ImportError as exc:
         raise SystemExit("patchright required: pip install patchright") from exc
 
+    seb_short = ".".join(version.split(".")[:3])
+    user_agent = (
+        f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        f"AppleWebKit/537.36 (KHTML, like Gecko) SEB/{seb_short} (x64)"
+    )
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    seb_short = ".".join(version.split(".")[:3])
-    user_agent = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) SEB/{seb_short} (x64)"
-    
+    defuser_tag = f"<script>{END_SCRIPT_RE.sub(r'<\\/script>', DEFUSER_JS)}</script>"
+
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
+            channel="chrome",
             headless=False,
             no_viewport=True,
             user_agent=user_agent,
-            ignore_https_errors=True
+            ignore_https_errors=True,
         )
-        
-        # Ensure DEFUSER_JS does NOT patch window.fetch anymore. (Remove the bypassInternetCheck block).
-        context.add_init_script(DEFUSER_JS)
 
         header_cache: dict[str, tuple[str, str]] = {}
         _req_hash = request_hash
@@ -724,65 +763,90 @@ def launch_patchright(start_url: str, version: str, config_key: str, browser_key
         _bek = browser_key
 
         def route_handler(route):
-            req_url = route.request.url
-            if "favicon.ico" in req_url or "google.com" in req_url:
-                try:
-                    response = route.fetch()
-                    route.fulfill(response=response)
-                except Exception:
-                    route.fulfill(status=200, body=b"", headers={"Content-Type": "image/x-icon"})
-                return
-
-            # =========================================================
-            # Handle CORS Preflight for Sarathi
-            # =========================================================
             if route.request.method == "OPTIONS":
-                origin = route.request.headers.get("origin", "https://sarathi.parivahan.gov.in")
-                route.fulfill(status=204, headers={
-                    "Access-Control-Allow-Origin": origin,
-                    "Access-Control-Allow-Credentials": "true",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-SafeExamBrowser-ConfigKeyHash, X-SafeExamBrowser-RequestHash",
-                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS"
-                })
+                origin = route.request.headers.get(
+                    "origin", "https://sarathi.parivahan.gov.in"
+                )
+                route.fulfill(
+                    status=204,
+                    headers={
+                        "Access-Control-Allow-Origin": origin,
+                        "Access-Control-Allow-Credentials": "true",
+                        "Access-Control-Allow-Headers": (
+                            "Content-Type, Authorization, "
+                            "X-SafeExamBrowser-ConfigKeyHash, "
+                            "X-SafeExamBrowser-RequestHash"
+                        ),
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                    },
+                )
                 return
 
-            # =========================================================
-            # Inject SEB headers for Sarathi
-            # =========================================================
-            if "sarathi.parivahan.gov.in" in req_url:
-                clean_url = req_url.split("#")[0]
-                pair = header_cache.get(clean_url)
-                if pair is None:
-                    pair = (_req_hash(clean_url, _ck), _req_hash(clean_url, _bek))
-                    if len(header_cache) < 512:
-                        header_cache[clean_url] = pair
-                        
-                headers = dict(route.request.headers)
-                headers["X-SafeExamBrowser-ConfigKeyHash"], headers["X-SafeExamBrowser-RequestHash"] = pair
-                
+            clean_url = route.request.url.split("#")[0]
+            pair = header_cache.get(clean_url)
+            if pair is None:
+                pair = (_req_hash(clean_url, _ck), _req_hash(clean_url, _bek))
+                if len(header_cache) < 512:
+                    header_cache[clean_url] = pair
+
+            headers = dict(route.request.headers)
+            (
+                headers["X-SafeExamBrowser-ConfigKeyHash"],
+                headers["X-SafeExamBrowser-RequestHash"],
+            ) = pair
+
+            try:
+                if route.request.resource_type == "document":
+                    resp = route.fetch(headers=headers)
+                    content_type = resp.headers.get("content-type", "")
+
+                    if "text/html" in content_type.lower():
+                        body = resp.text()
+                        if HEAD_RE.search(body):
+                            body = HEAD_RE.sub(
+                                lambda m: m.group(1) + defuser_tag, body, count=1
+                            )
+                        else:
+                            body = defuser_tag + body
+
+                        resp_headers = {
+                            k: v
+                            for k, v in resp.headers.items()
+                            if k.lower()
+                            not in {
+                                "content-encoding",
+                                "content-length",
+                                "content-security-policy",
+                                "content-security-policy-report-only",
+                            }
+                        }
+                        route.fulfill(
+                            status=resp.status, headers=resp_headers, body=body
+                        )
+                        return
+
+                    route.fulfill(response=resp)
+                else:
+                    route.continue_(headers=headers)
+            except Exception:
                 try:
                     route.continue_(headers=headers)
                 except Exception:
                     pass
-            else:
-                try:
-                    route.continue_()
-                except Exception:
-                    pass
 
-        context.route("**/*", route_handler)
-        
+        context.route("https://sarathi.parivahan.gov.in/**", route_handler)
+
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(start_url, wait_until="domcontentloaded")
-            
+
             while context.pages:
                 context.pages[0].wait_for_event("close", timeout=0)
         finally:
             context.close()
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("seb", type=Path)
+    parser.add_argument("seb", type=Path)   
     parser.add_argument("--root", type=Path, default=None)
     parser.add_argument("--password", default="")
     parser.add_argument("--no-cache", action="store_true")
