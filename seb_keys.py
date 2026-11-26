@@ -49,47 +49,7 @@ DEFUSER_JS = r"""
     browser: { isRunning: () => true }
   };
 
-  // 2. BYPASS INTERNET CHECK (NATIVE FETCH OVERRIDE + FORCE PATCH)
-  (function bypassInternetCheck() {
-    // A. Intercept the network request at the root level
-    const origFetch = window.fetch;
-    window.fetch = stealth(async function (input, init) {
-      let url = typeof input === 'string' ? input : (input?.url || '');
-      if (url.includes('google.com/favicon.ico') || url.includes('gstatic.com') || url.includes('favicon.ico')) {
-        // Return a valid 200 OK response so Angular thinks the internet is perfect
-        return new Response('', { status: 200, statusText: 'OK', headers: { 'Content-Type': 'image/x-icon' } });
-      }
-      return origFetch.apply(this, arguments);
-    }, 'fetch');
-
-    // B. Forcefully overwrite the method on the component and its services
-    const patch = (obj) => {
-      if (!obj || typeof obj !== 'object') return;
-      try {
-        if (obj.checkRealInternet && !obj.checkRealInternet.__patched) {
-          Object.defineProperty(obj, 'checkRealInternet', {
-            value: stealth(async () => true, 'checkRealInternet'),
-            configurable: true,
-            writable: true
-          });
-          obj.checkRealInternet.__patched = true;
-        }
-      } catch (e) {}
-    };
-
-    setInterval(() => {
-      if (window.__cmp) {
-        patch(window.__cmp);
-        if (window.__cmp.networkService) {
-          patch(window.__cmp.networkService);
-          patch(Object.getPrototypeOf(window.__cmp.networkService));
-        }
-        patch(Object.getPrototypeOf(window.__cmp));
-      }
-    }, 50);
-  })();
-
-  // 3. EXPOSE ANGULAR COMPONENT (__cmp)
+  // 2. EXPOSE ANGULAR COMPONENT (__cmp)
   (function captureComponent() {
     const check = (thisArg) => {
       if (window.__cmp || !thisArg || typeof thisArg !== 'object') return;
@@ -110,7 +70,7 @@ DEFUSER_JS = r"""
     }, 'apply');
   })();
 
-  // 4. PATCH ONNX & CAMERA
+  // 3. PATCH ONNX & CAMERA
   (function patchProctoringServices() {
     const interval = setInterval(() => {
       if (window.__cmp && window.__cmp.proctorService && window.__cmp.anti) {
@@ -135,7 +95,7 @@ DEFUSER_JS = r"""
     }, 500);
   })();
 
-  // 5. CRYPTO INTERCEPTOR
+  // 4. CRYPTO INTERCEPTOR
   (function interceptCrypto() {
     if (!window.crypto || !window.crypto.subtle) return;
     try {
@@ -188,7 +148,7 @@ DEFUSER_JS = r"""
     } catch (e) {}
   })();
 
-  // 6. DEFUSE TIMERS & CONTEXT MENU
+  // 5. DEFUSE TIMERS & CONTEXT MENU
   (function neutralizeTraps() {
     const hasDebugger = (src) => /\bdebugger\b/.test(src);
     function isAntiDebugFn(fn) {
@@ -215,7 +175,7 @@ DEFUSER_JS = r"""
     }, 'defineProperty');
   })();
 
-  // 7. DEFUSE KEYS & HISTORY & STORAGE
+  // 6. DEFUSE KEYS & HISTORY & STORAGE
   window.addEventListener('keydown', (e) => {
     if ((e.altKey && e.key === 'ArrowLeft') || (e.key === 'Backspace' && !['INPUT', 'TEXTAREA'].includes(e.target?.tagName))) {
       e.stopImmediatePropagation();
@@ -241,7 +201,7 @@ DEFUSER_JS = r"""
     return origGet.call(this, k);
   }, 'getItem');
 
-  // 8. DEFUSE FINGERPRINTS & CAMERA LABELS
+  // 7. DEFUSE FINGERPRINTS & CAMERA LABELS
   try {
     const trackDesc = Object.getOwnPropertyDescriptor(MediaStreamTrack.prototype, 'label');
     if (trackDesc && trackDesc.get) {
@@ -755,7 +715,7 @@ def launch_patchright(start_url: str, version: str, config_key: str, browser_key
             ignore_https_errors=True
         )
         
-        # Inject the JS payload (with the internet check bypass)
+        # Ensure DEFUSER_JS does NOT patch window.fetch anymore. (Remove the bypassInternetCheck block).
         context.add_init_script(DEFUSER_JS)
 
         header_cache: dict[str, tuple[str, str]] = {}
@@ -764,7 +724,18 @@ def launch_patchright(start_url: str, version: str, config_key: str, browser_key
         _bek = browser_key
 
         def route_handler(route):
+            req_url = route.request.url
+            if "favicon.ico" in req_url or "google.com" in req_url:
+                try:
+                    response = route.fetch()
+                    route.fulfill(response=response)
+                except Exception:
+                    route.fulfill(status=200, body=b"", headers={"Content-Type": "image/x-icon"})
+                return
+
+            # =========================================================
             # Handle CORS Preflight for Sarathi
+            # =========================================================
             if route.request.method == "OPTIONS":
                 origin = route.request.headers.get("origin", "https://sarathi.parivahan.gov.in")
                 route.fulfill(status=204, headers={
@@ -775,23 +746,31 @@ def launch_patchright(start_url: str, version: str, config_key: str, browser_key
                 })
                 return
 
+            # =========================================================
             # Inject SEB headers for Sarathi
-            clean_url = route.request.url.split("#")[0]
-            pair = header_cache.get(clean_url)
-            if pair is None:
-                pair = (_req_hash(clean_url, _ck), _req_hash(clean_url, _bek))
-                if len(header_cache) < 512:
-                    header_cache[clean_url] = pair
-                    
-            headers = dict(route.request.headers)
-            headers["X-SafeExamBrowser-ConfigKeyHash"], headers["X-SafeExamBrowser-RequestHash"] = pair
-            
-            try:
-                route.continue_(headers=headers)
-            except Exception:
-                pass
+            # =========================================================
+            if "sarathi.parivahan.gov.in" in req_url:
+                clean_url = req_url.split("#")[0]
+                pair = header_cache.get(clean_url)
+                if pair is None:
+                    pair = (_req_hash(clean_url, _ck), _req_hash(clean_url, _bek))
+                    if len(header_cache) < 512:
+                        header_cache[clean_url] = pair
+                        
+                headers = dict(route.request.headers)
+                headers["X-SafeExamBrowser-ConfigKeyHash"], headers["X-SafeExamBrowser-RequestHash"] = pair
+                
+                try:
+                    route.continue_(headers=headers)
+                except Exception:
+                    pass
+            else:
+                try:
+                    route.continue_()
+                except Exception:
+                    pass
 
-        context.route("https://sarathi.parivahan.gov.in/**", route_handler)
+        context.route("**/*", route_handler)
         
         try:
             page = context.pages[0] if context.pages else context.new_page()
