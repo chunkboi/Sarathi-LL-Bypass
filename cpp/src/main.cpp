@@ -69,6 +69,16 @@ static void enable_process_mitigations() {
     PROCESS_MITIGATION_FONT_DISABLE_POLICY fdp{};
     fdp.DisableNonSystemFonts = 1;
     SetProcessMitigationPolicy(ProcessFontDisablePolicy, &fdp, sizeof(fdp));
+
+    // 7. Enforce high-entropy bottom-up ASLR and mandatory image relocation
+    PROCESS_MITIGATION_ASLR_POLICY aslr{};
+    aslr.EnableBottomUpRandomization = 1;
+    aslr.EnableForceRelocateImages = 1;
+    aslr.EnableHighEntropy = 1;
+    SetProcessMitigationPolicy(ProcessASLRPolicy, &aslr, sizeof(aslr));
+
+    // 8. Terminate immediately on Windows heap metadata corruption
+    HeapSetInformation(nullptr, HeapEnableTerminationOnCorruption, nullptr, 0);
 }
 
 static std::pair<uint64_t, uint64_t> file_mtime_and_size_w(const wchar_t* p) {
@@ -347,6 +357,10 @@ int main() {
                 const auto parse_start = std::chrono::steady_clock::now();
                 auto [xml, mode] = seb::unpack_container(std::move(raw), password);
                 auto settings = seb::plist::load_settings_xml_bytes(xml);
+                if (!xml.empty()) {
+                    SecureZeroMemory(xml.data(), xml.size());
+                    xml.clear();
+                }
                 auto purpose = seb::detect_purpose(mode, settings);
                 salt = seb::salt_hex(settings);
                 config_key = seb::plist::exam_configuration_key(settings, purpose);

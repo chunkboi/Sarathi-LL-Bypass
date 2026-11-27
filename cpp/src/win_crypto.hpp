@@ -356,10 +356,14 @@ inline std::vector<uint8_t> aes256_cbc_decrypt(
     if (out.empty()) throw std::runtime_error("empty decrypted data");
     uint8_t pad = out.back();
     if (pad == 0 || pad > 16 || pad > out.size()) {
+        SecureZeroMemory(out.data(), out.size());
         throw std::runtime_error("invalid PKCS7 padding");
     }
     for (size_t i = out.size() - pad; i < out.size(); ++i) {
-        if (out[i] != pad) throw std::runtime_error("invalid PKCS7 padding bytes");
+        if (out[i] != pad) {
+            SecureZeroMemory(out.data(), out.size());
+            throw std::runtime_error("invalid PKCS7 padding bytes");
+        }
     }
     out.resize(out.size() - pad);
     return out;

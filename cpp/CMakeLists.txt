@@ -49,7 +49,7 @@ else()
         -Wpedantic
         -fno-strict-aliasing
         -fstack-protector-strong
-        $<$<CXX_COMPILER_ID:Clang>:-mguard=cf>)
+        $<$<CXX_COMPILER_ID:Clang>:-mguard=cf -ftrivial-auto-var-init=zero>)
 
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         target_link_options(seb_keys PRIVATE -fuse-ld=lld -static -static-libgcc -static-libstdc++ -pthread)
