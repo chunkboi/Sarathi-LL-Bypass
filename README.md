@@ -92,8 +92,10 @@ cpp/src/
 ## 🛠️ How to Compile
 
 ### Prerequisites
-- **Windows 10 / 11 (x64)** with **Safe Exam Browser** installed (e.g. `C:\Program Files\SafeExamBrowser`) and **Google Chrome** or **Microsoft Edge**.
-- **LLVM / Clang 22+** (`clang++.exe` + `lld`) and **MinGW-w64** headers/static libraries (e.g. `C:\Users\comic\.choosenim\toolchains\mingw64\bin`).
+- **Windows 10 / 11 (x64)**
+- **Exact Official Safe Exam Browser (SEB) from the Sarathi Portal** *(required)*: You **must** install the exact SEB build provided by the Sarathi Parivahan portal (e.g., `3.10.0.826` in `C:\Program Files\SafeExamBrowser`). `BrowserExamKey` hashes the entire SEB installation directory, PE versions, Authenticode signatures, and `seb_x64.dll`'s integrity salt — any different SEB version will produce the wrong key and fail server validation.
+- **Browser for `--launch`**: **Google Chrome** is recommended (auto-detected), with **Microsoft Edge** (built into Windows 10/11) automatically used as a fallback if Chrome is not installed. *(No browser is required if running without `--launch` to only print keys.)*
+- **Build Tools (only to compile from source)**: **LLVM / Clang 22+** (`clang++.exe` + `lld`) and **MinGW-w64** headers/static libraries (e.g. `C:\Users\comic\.choosenim\toolchains\mingw64\bin`). Running the compiled `seb_keys.exe` requires **no** compiler or runtime installs.
 
 ### Option 1: Clang + LLVM `lld` (Recommended — C++26, CFG, Static Windows-Only Binary)
 
