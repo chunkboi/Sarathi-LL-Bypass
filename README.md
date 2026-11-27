@@ -6,6 +6,24 @@ It produces a single static executable (`seb_keys.exe`, ~2.0 MB) that depends **
 
 ---
 
+## Improvements Over the Python Version
+
+| Area | Python (`seb_keys.py`) | Native C++26 (`seb_keys.exe`) |
+| :--- | :--- | :--- |
+| **Runtime Dependencies** | Python 3.9+, `rncryptor`, `pefile`, `patchright` + Chromium | Single ~2.0 MB static `.exe` (Windows OS DLLs only) |
+| **Warm CLI Latency** | ~270 ms | **~21 ms** (**12.6x faster**) |
+| **Cold CLI Latency (`--no-cache`)** | ~1,723 ms | **~488 ms** (**3.53x faster**) |
+| **PE Salt Extraction (`seb_x64.dll`)** | ~31.07 ms (`pefile`) | **~0.97 ms** (**32.0x faster**, `NtCreateSection` + `.text` scan) |
+| **Request Hash (10K iterations)** | ~11.74 ms (`hashlib`) | **~3.23 ms** (**3.64x faster**, reusable `BCRYPT_HASH_REUSABLE_FLAG`) |
+| **Browser Launch (First Request)** | ~3,563 ms (Patchright/Node driver) | **~1,616 ms** (**2.20x faster**, raw WinSock2 CDP + 50 ms non-blocking connect) |
+| **Browser Process Cleanup** | Can orphan Chrome if killed | Kernel-enforced `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` kills Chrome on exit |
+| **Certificate Bypass** | `--ignore-certificate-errors` CLI flag (triggers Chrome warning bar) | CDP `Security.setIgnoreCertificateErrors` (zero infobar warning) |
+| **Process Hardening** | Standard Python interpreter | `SetProcessMitigationPolicy` (ACG, strict handles, no remote/low-IL DLLs, no extension points) + Control Flow Guard (`-mguard=cf`) |
+| **Low-Level I/O** | Win32 / Python `os` wrappers | Direct `ntdll.dll` syscalls (`NtCreateFile`, `NtQueryDirectoryFile`, `NtMapViewOfSection`, `NtOpenKey`, `NtWaitForMultipleObjects`) |
+| **Diagnostics** | Basic stdout | `-v` / `--verbose` logs timing, cache hits, job binding, and CDP traffic to `stderr` |
+
+---
+
 ## Architecture Overview
 
 ```
@@ -77,6 +95,15 @@ cmake --build cpp/build --config Release
 ```
 
 *(Override the C++ standard with `-DSEB_CXX_STANDARD=23` if using an older compiler.)*
+
+### Option 3: MinGW-w64 `g++` Fallback (C++20)
+
+```powershell
+g++ -std=c++20 -O3 -march=native -flto -static -static-libgcc -static-libstdc++ -pthread `
+  -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00 -D_CRT_SECURE_NO_WARNINGS `
+  cpp\src\main.cpp -o cpp\build\seb_keys.exe `
+  -lntdll -lbcrypt -lcrypt32 -lversion -lws2_32 -ladvapi32 -lshell32
+```
 
 ---
 
