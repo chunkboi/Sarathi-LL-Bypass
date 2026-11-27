@@ -71,7 +71,8 @@ cpp/src/
    - `ProcessSignaturePolicy` (`MicrosoftSignedOnly = 1`): Blocks any unsigned DLL from loading at runtime (enabled by full static linking).
    - `ProcessFontDisablePolicy` (`DisableNonSystemFonts = 1`): Blocks untrusted non-system fonts.
    - `ProcessASLRPolicy` (`EnableBottomUpRandomization`, `EnableForceRelocateImages`, `EnableHighEntropy`): Enforces 64-bit high-entropy ASLR (`HIGH_ENTROPY_VA`, `DYNAMIC_BASE`, `NX_COMPAT`).
-   - **Heap, Stack & Bounds Protection**: Calls `HeapSetInformation(..., HeapEnableTerminationOnCorruption, ...)` to terminate on heap corruption, compiles with `-fstack-protector-strong`, `-ftrivial-auto-var-init=zero` (zero-initializes stack variables), `-D_GLIBCXX_ASSERTIONS` (C++ standard library bounds checks), and `-s -Wl,--gc-sections` (dead-code elimination + symbol stripping), and wipes sensitive buffers (`--password`, RNCryptor keys, IVs, decrypted `.seb` XML) with `SecureZeroMemory`.
+   - **DLL Search & Process DACL Hardening**: Calls `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` and restricts the process DACL via `SetSecurityInfo` (stripping `PROCESS_VM_READ`/`WRITE`/`DUP_HANDLE` from external non-elevated processes while preserving `PROCESS_TERMINATE` and `SYNCHRONIZE`).
+   - **Heap, Stack, RAM-Pinning & Bounds Protection**: Calls `HeapSetInformation(..., HeapEnableTerminationOnCorruption, ...)`, compiles with `-fstack-protector-strong`, `-ftrivial-auto-var-init=zero`, `-D_GLIBCXX_ASSERTIONS`, and `-s -Wl,--gc-sections`, pins sensitive key buffers (`--password`, RNCryptor keys) in RAM with `VirtualLock` (`MemoryLockGuard`), and wipes secrets/decrypted `.seb` XML with `SecureZeroMemory`.
 
 2. **SEB Key Derivation (`seb.hpp`, `plist.hpp`, `inflate.hpp`, `win_crypto.hpp`)**
    - **Container Unpacking**: Reads the Sarathi `.seb` file (capped at 64 MiB) and unwraps `pwcc`/`pswd` (RNCryptor v2/v3 via PBKDF2-HMAC-SHA1 + HMAC-SHA256 + AES-256-CBC in `bcrypt.dll`), `plnd`, and gzip layers.
@@ -80,7 +81,7 @@ cpp/src/
    - **BrowserExamKey**: `SHA256(tree_bytes + configKey + examKeySalt + integrity_salt_const)`.
 
 3. **Stealth Chrome Launcher & Sarathi CDP Proxy (`cdp.hpp`)**
-   - **Job-Bound Chrome (`JobGuard`)**: Spawns Chrome/Edge with `CREATE_SUSPENDED` and binds it to a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` job before resuming — killing `seb_keys.exe` from the CLI kills Chrome immediately.
+   - **Job-Bound Chrome + Child Mitigations (`JobGuard` / `STARTUPINFOEXW`)**: Spawns Chrome/Edge with `CREATE_SUSPENDED`, applies child process mitigations (`HEAP_TERMINATE`, `BOTTOM_UP_ASLR`, `HIGH_ENTROPY_ASLR`, `FORCE_RELOCATE_IMAGES`, `PREFER_SYSTEM32`) via `PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY`, and binds it to a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` job before resuming — killing `seb_keys.exe` from the CLI kills Chrome immediately.
    - **Stealth & Certs**: Launches with `--disable-blink-features=AutomationControlled`, injects `STEALTH_JS` via `Page.addScriptToEvaluateOnNewDocument` (without `Runtime.enable`, preventing CDP stack-leak probes), and enables `Security.setIgnoreCertificateErrors` over CDP.
    - **Traffic Interception (`https://sarathi.parivahan.gov.in/*`)**: Uses `Fetch.enable` and `Target.setAutoAttach` (for popups/tabs) over a raw WinSock2 WebSocket client (`BCryptGenRandom` RFC 6455 masking):
      - Answers CORS `OPTIONS` preflights with `204` and sanitized `Origin`.

@@ -839,10 +839,36 @@ inline void launch_cdp_browser(
                            L" --use-mock-keychain" +
                            L" --no-first-run --no-default-browser-check about:blank";
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
+    // Apply safe child-process mitigations to Chrome/Edge via STARTUPINFOEXW
+    // (heap termination, high-entropy ASLR, forced image relocation). Do not
+    // enable ProhibitDynamicCode or MicrosoftSignedOnly on Chrome since V8
+    // requires JIT and Chrome loads Google-signed binaries.
+    STARTUPINFOEXW sie{};
+    sie.StartupInfo.cb = sizeof(sie);
+    DWORD64 child_mitigations =
+        static_cast<DWORD64>(PROCESS_CREATION_MITIGATION_POLICY_HEAP_TERMINATE_ALWAYS_ON) |
+        static_cast<DWORD64>(PROCESS_CREATION_MITIGATION_POLICY_BOTTOM_UP_ASLR_ALWAYS_ON) |
+        static_cast<DWORD64>(PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_ON) |
+        static_cast<DWORD64>(PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_ALWAYS_ON) |
+        PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<uint8_t> attr_buf(attr_size);
+    LPPROC_THREAD_ATTRIBUTE_LIST attr_list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    bool has_attrs = attr_size > 0 &&
+        InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_size) &&
+        UpdateProcThreadAttribute(
+            attr_list, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+            &child_mitigations, sizeof(child_mitigations), nullptr, nullptr);
+    if (has_attrs) sie.lpAttributeList = attr_list;
+
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
+    DWORD create_flags = CREATE_SUSPENDED | (has_attrs ? EXTENDED_STARTUPINFO_PRESENT : 0);
+    BOOL launched = CreateProcessW(
+        nullptr, cmdline.data(), nullptr, nullptr, FALSE, create_flags,
+        nullptr, nullptr, &sie.StartupInfo, &pi);
+    if (has_attrs) DeleteProcThreadAttributeList(attr_list);
+    if (!launched) {
         throw std::runtime_error("failed to launch browser");
     }
     nt::NtHandle proc_h(pi.hProcess);

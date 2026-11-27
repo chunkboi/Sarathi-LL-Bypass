@@ -8,6 +8,7 @@
 #include "seb.hpp"
 #include "win_crypto.hpp"
 
+#include <aclapi.h>
 #include <shellapi.h>
 
 #include <chrono>
@@ -79,6 +80,40 @@ static void enable_process_mitigations() {
 
     // 8. Terminate immediately on Windows heap metadata corruption
     HeapSetInformation(nullptr, HeapEnableTerminationOnCorruption, nullptr, 0);
+
+    // 9. Restrict DLL search path to System32 only
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+    // 10. Restrict current process DACL to strip PROCESS_VM_READ/WRITE/DUP_HANDLE
+    //     from external non-elevated processes while keeping PROCESS_TERMINATE
+    //     and SYNCHRONIZE intact for normal CLI/parent termination.
+    HANDLE tok = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
+        seb::nt::NtHandle tok_h(tok);
+        DWORD sz = 0;
+        GetTokenInformation(tok_h.get(), TokenUser, nullptr, 0, &sz);
+        if (sz > 0) {
+            std::vector<uint8_t> ubuf(sz);
+            if (GetTokenInformation(tok_h.get(), TokenUser, ubuf.data(), sz, &sz)) {
+                auto* tu = reinterpret_cast<TOKEN_USER*>(ubuf.data());
+                EXPLICIT_ACCESSW ea{};
+                ea.grfAccessPermissions = PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+                ea.grfAccessMode = SET_ACCESS;
+                ea.grfInheritance = NO_INHERITANCE;
+                ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+                ea.Trustee.TrusteeType = TRUSTEE_IS_USER;
+                ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(tu->User.Sid);
+                PACL dacl = nullptr;
+                if (SetEntriesInAclW(1, &ea, nullptr, &dacl) == ERROR_SUCCESS && dacl) {
+                    SetSecurityInfo(
+                        GetCurrentProcess(), SE_KERNEL_OBJECT,
+                        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                        nullptr, nullptr, dacl, nullptr);
+                    LocalFree(dacl);
+                }
+            }
+        }
+    }
 }
 
 static std::pair<uint64_t, uint64_t> file_mtime_and_size_w(const wchar_t* p) {
@@ -218,6 +253,7 @@ int main() {
 
     try {
         std::wstring root = root_arg.has_value() ? *root_arg : seb::detect_seb_root();
+        seb::win::MemoryLockGuard pwd_lock(password.empty() ? nullptr : password.data(), password.size());
         auto [seb_mtime, seb_size] = file_mtime_and_size_w(seb_path->c_str());
         if (seb_size > 64ULL * 1024 * 1024) {
             throw std::runtime_error("input .seb file exceeds 64 MiB limit");

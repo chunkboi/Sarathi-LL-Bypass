@@ -33,6 +33,28 @@ namespace seb::win {
 using WinHandle = nt::NtHandle;
 using MappedFile = nt::NtMappedFile;
 
+// Pins sensitive memory pages in RAM (preventing paging to pagefile.sys) and
+// securely wipes + unlocks them when leaving scope.
+struct MemoryLockGuard {
+    void* ptr = nullptr;
+    size_t len = 0;
+    bool locked = false;
+
+    MemoryLockGuard(void* p, size_t n) : ptr(p), len(n) {
+        if (ptr && len > 0) {
+            locked = (VirtualLock(ptr, len) != 0);
+        }
+    }
+    ~MemoryLockGuard() {
+        if (ptr && len > 0) {
+            SecureZeroMemory(ptr, len);
+            if (locked) VirtualUnlock(ptr, len);
+        }
+    }
+    MemoryLockGuard(const MemoryLockGuard&) = delete;
+    MemoryLockGuard& operator=(const MemoryLockGuard&) = delete;
+};
+
 inline std::vector<uint8_t> read_file_bytes_w(const wchar_t* path) {
     return nt::nt_read_file_bytes_w(path);
 }

@@ -585,16 +585,15 @@ inline std::vector<uint8_t> rncryptor_decrypt(const uint8_t* data, size_t len, s
     const uint8_t* mac = data + len - 32;
 
     auto hmac_key = win::pbkdf2_hmac_sha1_32(password, hmac_salt, 8, 10000);
+    win::MemoryLockGuard hmac_lock(hmac_key.data(), hmac_key.size());
     auto expected_mac = win::hmac_sha256_raw(hmac_key.data(), hmac_key.size(), data, len - 32);
-    SecureZeroMemory(hmac_key.data(), hmac_key.size());
     uint8_t diff = 0;
     for (int i = 0; i < 32; ++i) diff |= expected_mac[i] ^ mac[i];
     if (diff != 0) throw std::runtime_error("rncryptor HMAC verification failed (wrong password?)");
 
     auto enc_key = win::pbkdf2_hmac_sha1_32(password, enc_salt, 8, 10000);
-    auto plain = win::aes256_cbc_decrypt(enc_key.data(), enc_key.size(), iv, ciphertext, ct_len);
-    SecureZeroMemory(enc_key.data(), enc_key.size());
-    return plain;
+    win::MemoryLockGuard enc_lock(enc_key.data(), enc_key.size());
+    return win::aes256_cbc_decrypt(enc_key.data(), enc_key.size(), iv, ciphertext, ct_len);
 }
 
 // Cheap first-byte validation so an obviously invalid file can be rejected
