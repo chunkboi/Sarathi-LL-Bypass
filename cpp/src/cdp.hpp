@@ -600,6 +600,10 @@ struct WsClient {
         std::string path = (slash == std::string::npos) ? "/" : rest.substr(slash);
         size_t colon = host_port.find(':');
         if (colon == std::string::npos) throw std::runtime_error("missing port in ws url");
+        std::string host = host_port.substr(0, colon);
+        if (host != "127.0.0.1" && host != "localhost") {
+            throw std::runtime_error("refusing non-loopback ws host");
+        }
         int port_i = std::stoi(host_port.substr(colon + 1));
         if (port_i <= 0 || port_i > 65535) throw std::runtime_error("invalid port in ws url");
         uint16_t port = static_cast<uint16_t>(port_i);
@@ -608,8 +612,9 @@ struct WsClient {
         BOOL nodelay = TRUE;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
 
-        const char key_raw[] = "seb_keys_cdp_ws!";
-        std::string key = win::base64_encode(reinterpret_cast<const uint8_t*>(key_raw), 16);
+        uint8_t key_raw[16]{};
+        BCryptGenRandom(nullptr, key_raw, sizeof(key_raw), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        std::string key = win::base64_encode(key_raw, sizeof(key_raw));
         std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + host_port +
                           "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + key +
                           "\r\nSec-WebSocket-Version: 13\r\n\r\n";

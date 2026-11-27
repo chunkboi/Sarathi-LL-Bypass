@@ -48,6 +48,7 @@ else()
         -Wextra
         -Wpedantic
         -fno-strict-aliasing
+        -fstack-protector-strong
         $<$<CXX_COMPILER_ID:Clang>:-mguard=cf>)
 
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")

@@ -46,16 +46,29 @@ static void enable_process_mitigations() {
     shcp.HandleExceptionsPermanentlyEnabled = 1;
     SetProcessMitigationPolicy(ProcessStrictHandleCheckPolicy, &shcp, sizeof(shcp));
 
-    // 3. Block loading DLLs from remote network shares or untrusted low-integrity folders
+    // 3. Block loading DLLs from remote network shares or untrusted low-integrity folders,
+    //    and force System32 to be searched before the application directory.
     PROCESS_MITIGATION_IMAGE_LOAD_POLICY ilp{};
     ilp.NoRemoteImages = 1;
     ilp.NoLowMandatoryLabelImages = 1;
+    ilp.PreferSystem32Images = 1;
     SetProcessMitigationPolicy(ProcessImageLoadPolicy, &ilp, sizeof(ilp));
 
     // 4. Disable legacy Win32 extension points (AppInit_DLLs, global hooks)
     PROCESS_MITIGATION_EXTENSION_POINT_DISABLE_POLICY epdp{};
     epdp.DisableExtensionPoints = 1;
     SetProcessMitigationPolicy(ProcessExtensionPointDisablePolicy, &epdp, sizeof(epdp));
+
+    // 5. Require all dynamically loaded DLLs to be Microsoft-signed (safe because
+    //    seb_keys.exe is statically linked with no external MinGW runtime DLLs).
+    PROCESS_MITIGATION_BINARY_SIGNATURE_POLICY bsp{};
+    bsp.MicrosoftSignedOnly = 1;
+    SetProcessMitigationPolicy(ProcessSignaturePolicy, &bsp, sizeof(bsp));
+
+    // 6. Block loading untrusted non-system fonts
+    PROCESS_MITIGATION_FONT_DISABLE_POLICY fdp{};
+    fdp.DisableNonSystemFonts = 1;
+    SetProcessMitigationPolicy(ProcessFontDisablePolicy, &fdp, sizeof(fdp));
 }
 
 static std::pair<uint64_t, uint64_t> file_mtime_and_size_w(const wchar_t* p) {
@@ -447,7 +460,16 @@ int main() {
             }
         }
     } catch (const std::exception& ex) {
+        if (!password.empty()) {
+            SecureZeroMemory(password.data(), password.size());
+            password.clear();
+        }
         usage_and_exit(ex.what());
+    }
+
+    if (!password.empty()) {
+        SecureZeroMemory(password.data(), password.size());
+        password.clear();
     }
 
     std::cout << "configKey=" << config_key << "\n"

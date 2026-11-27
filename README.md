@@ -66,8 +66,11 @@ cpp/src/
    At startup, `enable_process_mitigations()` locks down `seb_keys.exe` via `SetProcessMitigationPolicy`:
    - `ProcessDynamicCodePolicy` (`ProhibitDynamicCode = 1`): Blocks runtime dynamic code generation and `VirtualProtect(..., PAGE_EXECUTE_*)` (ACG).
    - `ProcessStrictHandleCheckPolicy`: Raises an immediate exception on invalid or double-closed `HANDLE`s.
-   - `ProcessImageLoadPolicy`: Blocks DLL loads from remote UNC shares or low-integrity folders.
+   - `ProcessImageLoadPolicy` (`NoRemoteImages`, `NoLowMandatoryLabelImages`, `PreferSystem32Images`): Blocks remote/low-IL DLLs and searches `System32` first to prevent DLL hijacking.
    - `ProcessExtensionPointDisablePolicy`: Disables legacy `AppInit_DLLs` and global hooks.
+   - `ProcessSignaturePolicy` (`MicrosoftSignedOnly = 1`): Blocks any unsigned DLL from loading at runtime (enabled by full static linking).
+   - `ProcessFontDisablePolicy` (`DisableNonSystemFonts = 1`): Blocks untrusted non-system fonts.
+   - **Memory Hygiene**: Sensitive key material (`--password`, RNCryptor HMAC/AES keys, IVs) is wiped with `SecureZeroMemory` immediately after use.
 
 2. **SEB Key Derivation (`seb.hpp`, `plist.hpp`, `inflate.hpp`, `win_crypto.hpp`)**
    - **Container Unpacking**: Reads the Sarathi `.seb` file (capped at 64 MiB) and unwraps `pwcc`/`pswd` (RNCryptor v2/v3 via PBKDF2-HMAC-SHA1 + HMAC-SHA256 + AES-256-CBC in `bcrypt.dll`), `plnd`, and gzip layers.
@@ -97,7 +100,8 @@ cpp/src/
 $env:PATH = "C:\Program Files\LLVM\bin;C:\Users\comic\.choosenim\toolchains\mingw64\bin;$env:PATH"
 
 clang++ --target=x86_64-w64-mingw32 -std=c++26 -O3 -march=native -flto `
-  -mguard=cf -fuse-ld=lld -static -static-libgcc -static-libstdc++ -pthread `
+  -mguard=cf -fstack-protector-strong -fuse-ld=lld `
+  -static -static-libgcc -static-libstdc++ -pthread `
   -Wall -Wextra -Wpedantic -Wshadow `
   -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00 -D_CRT_SECURE_NO_WARNINGS `
   cpp\src\main.cpp -o cpp\build\seb_keys.exe `

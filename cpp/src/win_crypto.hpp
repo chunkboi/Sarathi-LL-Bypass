@@ -348,6 +348,7 @@ inline std::vector<uint8_t> aes256_cbc_decrypt(
         static_cast<ULONG>(out.size()),
         &res_len,
         0);
+    SecureZeroMemory(iv_buf, sizeof(iv_buf));
     BCryptDestroyKey(hKey);
     if (st != 0) throw std::runtime_error("BCryptDecrypt failed");
 

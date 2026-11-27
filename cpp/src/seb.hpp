@@ -586,12 +586,15 @@ inline std::vector<uint8_t> rncryptor_decrypt(const uint8_t* data, size_t len, s
 
     auto hmac_key = win::pbkdf2_hmac_sha1_32(password, hmac_salt, 8, 10000);
     auto expected_mac = win::hmac_sha256_raw(hmac_key.data(), hmac_key.size(), data, len - 32);
+    SecureZeroMemory(hmac_key.data(), hmac_key.size());
     uint8_t diff = 0;
     for (int i = 0; i < 32; ++i) diff |= expected_mac[i] ^ mac[i];
     if (diff != 0) throw std::runtime_error("rncryptor HMAC verification failed (wrong password?)");
 
     auto enc_key = win::pbkdf2_hmac_sha1_32(password, enc_salt, 8, 10000);
-    return win::aes256_cbc_decrypt(enc_key.data(), enc_key.size(), iv, ciphertext, ct_len);
+    auto plain = win::aes256_cbc_decrypt(enc_key.data(), enc_key.size(), iv, ciphertext, ct_len);
+    SecureZeroMemory(enc_key.data(), enc_key.size());
+    return plain;
 }
 
 // Cheap first-byte validation so an obviously invalid file can be rejected
@@ -657,6 +660,9 @@ inline std::pair<std::vector<uint8_t>, std::string> unpack_container(
                     effective = effective_buf;
                 }
                 current = rncryptor_decrypt(current.data() + 4, current.size() - 4, effective);
+                if (!effective_buf.empty()) {
+                    SecureZeroMemory(effective_buf.data(), effective_buf.size());
+                }
                 continue;
             }
             if (hdr == "plnd") {
