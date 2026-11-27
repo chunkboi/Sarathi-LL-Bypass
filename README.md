@@ -103,10 +103,11 @@ cpp/src/
 ```powershell
 $env:PATH = "C:\Program Files\LLVM\bin;C:\Users\comic\.choosenim\toolchains\mingw64\bin;$env:PATH"
 
-clang++ --target=x86_64-w64-mingw32 -std=c++26 -O3 -march=native -flto `
+clang++ --target=x86_64-w64-mingw32 -std=c++26 -O3 -march=x86-64-v3 -flto `
+  -finput-charset=UTF-8 -fexec-charset=UTF-8 `
   -mguard=cf -fstack-protector-strong -ftrivial-auto-var-init=zero `
   -ffunction-sections -fdata-sections -fuse-ld=lld `
-  -static -static-libgcc -static-libstdc++ -pthread -s "-Wl,--gc-sections" `
+  -static -static-libgcc -static-libstdc++ -pthread -s "-Wl,--gc-sections,--no-insert-timestamp" `
   -Wall -Wextra -Wpedantic -Wshadow -D_GLIBCXX_ASSERTIONS `
   -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00 -D_CRT_SECURE_NO_WARNINGS `
   cpp\src\main.cpp -o cpp\build\seb_keys.exe `
