@@ -8,7 +8,7 @@
 
 A standalone, zero-dependency Windows x64 C++26 implementation of the **Sarathi Parivahan Learner's License (LL) Test** Safe Exam Browser (SEB) emulator and stealth Chrome DevTools Protocol (CDP) defuser.
 
-It compiles into a single ~2.0 MB static executable (`seb_keys.exe`) that depends **only on built-in Windows OS DLLs** — no Python, no Playwright/Patchright, and no external compiler runtime DLLs required. It emulates the exact SEB cryptographic handshake for `sarathi.parivahan.gov.in` to bypass 403 Forbidden errors, and injects `DEFUSER_JS` over a raw WinSock2 CDP proxy to neutralize Angular 20 anti-tamper checks, ONNX AI face proctoring, and camera security checks.
+It compiles into a single ~1.2 MB static executable (`seb_keys.exe`) that depends **only on built-in Windows OS DLLs** — no Python, no Playwright/Patchright, and no external compiler runtime DLLs required. It emulates the exact SEB cryptographic handshake for `sarathi.parivahan.gov.in` to bypass 403 Forbidden errors, and injects `DEFUSER_JS` over a raw WinSock2 CDP proxy to neutralize Angular 20 anti-tamper checks, ONNX AI face proctoring, and camera security checks.
 
 > **⚠️ STRICT DISCLAIMER**  
 > This repository is for **security research and educational reverse-engineering only**. Circumventing government exam proctoring, altering ONNX AI verdicts, or spoofing SEB integrity keys on live servers is illegal and violates the IT Act. The author assumes zero liability for misuse. Do not run this against live, production endpoints.
@@ -32,7 +32,7 @@ Through reverse-engineering the Sarathi Parivahan web app (`https://sarathi.pari
 
 | Area | Python (`seb_keys.py`) | Native C++26 (`seb_keys.exe`) |
 | :--- | :--- | :--- |
-| **Runtime Dependencies** | Python 3.9+, `rncryptor`, `pefile`, `patchright` + Chromium | Single ~2.0 MB static `.exe` (Windows OS DLLs only) |
+| **Runtime Dependencies** | Python 3.9+, `rncryptor`, `pefile`, `patchright` + Chromium | Single ~1.2 MB static `.exe` (Windows OS DLLs only) |
 | **Warm CLI Latency** | ~270 ms | **~21 ms** (**12.6x faster**) |
 | **Cold CLI Latency (`--no-cache`)** | ~1,723 ms | **~488 ms** (**3.53x faster**) |
 | **PE Salt Extraction (`seb_x64.dll`)** | ~31.07 ms (`pefile`) | **~0.97 ms** (**32.0x faster**, `NtCreateSection` + `.text` scan) |
@@ -71,7 +71,7 @@ cpp/src/
    - `ProcessSignaturePolicy` (`MicrosoftSignedOnly = 1`): Blocks any unsigned DLL from loading at runtime (enabled by full static linking).
    - `ProcessFontDisablePolicy` (`DisableNonSystemFonts = 1`): Blocks untrusted non-system fonts.
    - `ProcessASLRPolicy` (`EnableBottomUpRandomization`, `EnableForceRelocateImages`, `EnableHighEntropy`): Enforces 64-bit high-entropy ASLR (`HIGH_ENTROPY_VA`, `DYNAMIC_BASE`, `NX_COMPAT`).
-   - **Heap & Stack Memory Protection**: Calls `HeapSetInformation(..., HeapEnableTerminationOnCorruption, ...)` to terminate on heap corruption, compiles with `-fstack-protector-strong` + `-ftrivial-auto-var-init=zero` (zero-initializes stack variables), and wipes sensitive buffers (`--password`, RNCryptor keys, IVs, decrypted `.seb` XML) with `SecureZeroMemory`.
+   - **Heap, Stack & Bounds Protection**: Calls `HeapSetInformation(..., HeapEnableTerminationOnCorruption, ...)` to terminate on heap corruption, compiles with `-fstack-protector-strong`, `-ftrivial-auto-var-init=zero` (zero-initializes stack variables), `-D_GLIBCXX_ASSERTIONS` (C++ standard library bounds checks), and `-s -Wl,--gc-sections` (dead-code elimination + symbol stripping), and wipes sensitive buffers (`--password`, RNCryptor keys, IVs, decrypted `.seb` XML) with `SecureZeroMemory`.
 
 2. **SEB Key Derivation (`seb.hpp`, `plist.hpp`, `inflate.hpp`, `win_crypto.hpp`)**
    - **Container Unpacking**: Reads the Sarathi `.seb` file (capped at 64 MiB) and unwraps `pwcc`/`pswd` (RNCryptor v2/v3 via PBKDF2-HMAC-SHA1 + HMAC-SHA256 + AES-256-CBC in `bcrypt.dll`), `plnd`, and gzip layers.
@@ -101,9 +101,10 @@ cpp/src/
 $env:PATH = "C:\Program Files\LLVM\bin;C:\Users\comic\.choosenim\toolchains\mingw64\bin;$env:PATH"
 
 clang++ --target=x86_64-w64-mingw32 -std=c++26 -O3 -march=native -flto `
-  -mguard=cf -fstack-protector-strong -ftrivial-auto-var-init=zero -fuse-ld=lld `
-  -static -static-libgcc -static-libstdc++ -pthread `
-  -Wall -Wextra -Wpedantic -Wshadow `
+  -mguard=cf -fstack-protector-strong -ftrivial-auto-var-init=zero `
+  -ffunction-sections -fdata-sections -fuse-ld=lld `
+  -static -static-libgcc -static-libstdc++ -pthread -s "-Wl,--gc-sections" `
+  -Wall -Wextra -Wpedantic -Wshadow -D_GLIBCXX_ASSERTIONS `
   -DWIN32_LEAN_AND_MEAN -DNOMINMAX -D_WIN32_WINNT=0x0A00 -D_CRT_SECURE_NO_WARNINGS `
   cpp\src\main.cpp -o cpp\build\seb_keys.exe `
   -lntdll -lbcrypt -lcrypt32 -lversion -lws2_32 -ladvapi32 -lshell32

@@ -40,6 +40,7 @@ else()
         WIN32_LEAN_AND_MEAN
         NOMINMAX
         _WIN32_WINNT=0x0A00
+        _GLIBCXX_ASSERTIONS
         _CRT_SECURE_NO_WARNINGS)
 
     target_compile_options(seb_keys PRIVATE
@@ -49,12 +50,14 @@ else()
         -Wpedantic
         -fno-strict-aliasing
         -fstack-protector-strong
+        -ffunction-sections
+        -fdata-sections
         $<$<CXX_COMPILER_ID:Clang>:-mguard=cf -ftrivial-auto-var-init=zero>)
 
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        target_link_options(seb_keys PRIVATE -fuse-ld=lld -static -static-libgcc -static-libstdc++ -pthread)
+        target_link_options(seb_keys PRIVATE -fuse-ld=lld -s -Wl,--gc-sections -static -static-libgcc -static-libstdc++ -pthread)
     else()
-        target_link_options(seb_keys PRIVATE -static -static-libgcc -static-libstdc++ -pthread)
+        target_link_options(seb_keys PRIVATE -s -Wl,--gc-sections -static -static-libgcc -static-libstdc++ -pthread)
     endif()
 endif()
 
