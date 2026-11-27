@@ -123,6 +123,17 @@ __cmp.cd.detectChanges();
    The `forceLogout()` method calls `sessionStorage.clear()` and `indexedDB.deleteDatabase('LLTestCacheDB')`. The script hooks `Storage.prototype.clear` to back up and restore `examData`, `answers`, and `loginData`. It also fakes a successful IDB deletion.
 
 ---
-```
 
+## ⚡ Native C++26 Implementation (`cpp/`)
+
+For maximum speed and zero runtime dependencies (no Python or Playwright required), a standalone native C++26 port is available in [`cpp/`](cpp/README.md):
+
+- **Direct Windows NT & CNG Stack:** Uses `ntdll.dll` syscalls, `bcrypt.dll` (reusable SHA-256, HMAC, PBKDF2, AES-CBC), and `crypt32.dll` (Base64, Authenticode).
+- **Standalone Static Binary:** Links statically (`-static`) so `seb_keys.exe` depends **only on built-in Windows OS DLLs**.
+- **Raw WinSock2 CDP Launcher & Hardening:** Built-in WebSocket CDP proxy with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (kills Chrome when parent exits), Control Flow Guard (`-mguard=cf`), and `SetProcessMitigationPolicy` (ACG, strict handle checks, image-load & extension-point restrictions).
+
+See [cpp/README.md](cpp/README.md) for architecture details and Clang/CMake build instructions.
+
+---
+```
 ```
