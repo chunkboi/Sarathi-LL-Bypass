@@ -1,4 +1,3 @@
-```
 # Python
 __pycache__/
 *.pyc
@@ -33,6 +32,12 @@ dist/
 *.tar.gz
 *.whl
 *.zip
+rust/target/
+
+# Local SEB runtime artifacts
+.seb_chrome_profile/
+.seb_tree_cache.json
+*.seb
 
 # Logs
 *.log
@@ -52,4 +57,3 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
-```

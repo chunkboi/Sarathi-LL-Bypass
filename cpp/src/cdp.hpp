@@ -1,7 +1,7 @@
 #pragma once
 
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0601
+#define _WIN32_WINNT 0x0A00
 #endif
 
 #include <winsock2.h>
@@ -13,6 +13,7 @@
 #include "seb.hpp"
 #include "win_crypto.hpp"
 
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -238,7 +239,7 @@ const _origFetch = window.fetch;
      }
    } catch {}
  
-   try { if (navigator.webdriver) Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true }); } catch {}
+   try { if (navigator.webdriver) Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true, enumerable: true }); } catch {}
 
 
   // 8. Neutralize WebGPU / WebNN availability for isolated testing
@@ -375,12 +376,24 @@ inline std::string build_defuser_tag() {
     return "<script>" + replaced + "</script>";
 }
 
-inline std::string inject_defuser_html(const std::string& html, const std::string& defuser_tag) {
+[[nodiscard]] inline std::string inject_defuser_html(const std::string& html, const std::string& defuser_tag) {
     size_t pos = 0;
     while ((pos = find_ci_ascii(html, "<head", pos)) != std::string::npos) {
         char next = (pos + 5 < html.size()) ? html[pos + 5] : '>';
         if (next == '>' || std::isspace(static_cast<unsigned char>(next))) {
-            size_t gt = html.find('>', pos);
+            size_t gt = std::string::npos;
+            char quote = 0;
+            for (size_t p = pos + 5; p < html.size(); ++p) {
+                char ch = html[p];
+                if (quote != 0) {
+                    if (ch == quote) quote = 0;
+                } else if (ch == '"' || ch == '\'') {
+                    quote = ch;
+                } else if (ch == '>') {
+                    gt = p;
+                    break;
+                }
+            }
             if (gt != std::string::npos) {
                 std::string out;
                 out.reserve(html.size() + defuser_tag.size());
@@ -399,7 +412,7 @@ inline std::string inject_defuser_html(const std::string& html, const std::strin
     return out;
 }
 
-inline std::wstring find_chrome_exe() {
+[[nodiscard]] inline std::wstring find_chrome_exe() {
     const wchar_t* fixed_candidates[] = {
         LR"(C:\Program Files\Google\Chrome\Application\chrome.exe)",
         LR"(C:\Program Files (x86)\Google\Chrome\Application\chrome.exe)",
@@ -407,13 +420,17 @@ inline std::wstring find_chrome_exe() {
     for (const wchar_t* c : fixed_candidates) {
         if (seb::is_file_w(c)) return c;
     }
-    wchar_t local[MAX_PATH]{};
-    DWORD n = GetEnvironmentVariableW(L"LocalAppData", local, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        std::wstring p1 = seb::join_path_w(local, LR"(Google\Chrome\Application\chrome.exe)");
-        if (seb::is_file_w(p1.c_str())) return p1;
-        std::wstring p2 = seb::join_path_w(local, LR"(Microsoft\Edge\Application\msedge.exe)");
-        if (seb::is_file_w(p2.c_str())) return p2;
+    DWORD need = GetEnvironmentVariableW(L"LocalAppData", nullptr, 0);
+    if (need > 0 && need < 32768) {
+        std::wstring local(need, L'\0');
+        DWORD n = GetEnvironmentVariableW(L"LocalAppData", local.data(), need);
+        if (n > 0 && n < need) {
+            local.resize(n);
+            std::wstring p1 = seb::join_path_w(local, LR"(Google\Chrome\Application\chrome.exe)");
+            if (seb::is_file_w(p1.c_str())) return p1;
+            std::wstring p2 = seb::join_path_w(local, LR"(Microsoft\Edge\Application\msedge.exe)");
+            if (seb::is_file_w(p2.c_str())) return p2;
+        }
     }
     const wchar_t* edge_candidates[] = {
         LR"(C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe)",
@@ -431,86 +448,115 @@ inline void create_directories_w(const std::wstring& dir) {
     if (!parent.empty() && parent.size() < dir.size()) {
         create_directories_w(std::wstring(parent));
     }
-    CreateDirectoryW(dir.c_str(), nullptr);
+    if (!CreateDirectoryW(dir.c_str(), nullptr)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_ALREADY_EXISTS || !seb::is_dir_w(dir.c_str())) {
+            throw std::runtime_error("CreateDirectoryW failed (err=" + std::to_string(err) + ")");
+        }
+    }
 }
 
 struct WsaGuard {
     WsaGuard() {
         WSADATA wsa{};
-        WSAStartup(MAKEWORD(2, 2), &wsa);
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+            throw std::runtime_error("WSAStartup failed");
+        }
     }
     ~WsaGuard() { WSACleanup(); }
+    WsaGuard(const WsaGuard&) = delete;
+    WsaGuard& operator=(const WsaGuard&) = delete;
 };
 
-inline uint16_t free_local_port() {
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) throw std::runtime_error("socket failed");
+struct SocketGuard {
+    SOCKET s = INVALID_SOCKET;
+    SocketGuard() = default;
+    explicit SocketGuard(SOCKET sock) noexcept : s(sock) {}
+    ~SocketGuard() { reset(); }
+    SocketGuard(const SocketGuard&) = delete;
+    SocketGuard& operator=(const SocketGuard&) = delete;
+    SocketGuard(SocketGuard&& o) noexcept : s(std::exchange(o.s, INVALID_SOCKET)) {}
+    SocketGuard& operator=(SocketGuard&& o) noexcept {
+        if (this != &o) {
+            reset();
+            s = std::exchange(o.s, INVALID_SOCKET);
+        }
+        return *this;
+    }
+    void reset() noexcept {
+        if (s != INVALID_SOCKET) {
+            closesocket(s);
+            s = INVALID_SOCKET;
+        }
+    }
+    SOCKET get() const noexcept { return s; }
+    SOCKET release() noexcept { return std::exchange(s, INVALID_SOCKET); }
+};
+
+[[nodiscard]] inline uint16_t free_local_port() {
+    SocketGuard sg(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    if (sg.get() == INVALID_SOCKET) throw std::runtime_error("socket failed");
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
-    if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        closesocket(s);
+    if (bind(sg.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         throw std::runtime_error("bind failed");
     }
     int len = sizeof(addr);
-    getsockname(s, reinterpret_cast<sockaddr*>(&addr), &len);
-    uint16_t port = ntohs(addr.sin_port);
-    closesocket(s);
-    return port;
+    if (getsockname(sg.get(), reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        throw std::runtime_error("getsockname failed");
+    }
+    return ntohs(addr.sin_port);
 }
 
-inline SOCKET connect_local(uint16_t port, DWORD timeout_ms = 0) {
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) throw std::runtime_error("socket failed");
+[[nodiscard]] inline SOCKET connect_local(uint16_t port, DWORD timeout_ms = 0) {
+    SocketGuard sg(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+    if (sg.get() == INVALID_SOCKET) throw std::runtime_error("socket failed");
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
     if (timeout_ms > 0) {
         u_long nb = 1;
-        ioctlsocket(s, FIONBIO, &nb);
-        int rc = connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        ioctlsocket(sg.get(), static_cast<long>(FIONBIO), &nb);
+        int rc = connect(sg.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
         if (rc != 0) {
             int err = WSAGetLastError();
             if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS) {
-                closesocket(s);
                 throw std::runtime_error("connect failed");
             }
             fd_set wfds, efds;
             FD_ZERO(&wfds);
             FD_ZERO(&efds);
-            FD_SET(s, &wfds);
-            FD_SET(s, &efds);
+            FD_SET(sg.get(), &wfds);
+            FD_SET(sg.get(), &efds);
             timeval tv{};
             tv.tv_sec = static_cast<long>(timeout_ms / 1000);
             tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
             int sel = select(0, nullptr, &wfds, &efds, &tv);
-            if (sel <= 0 || FD_ISSET(s, &efds) || !FD_ISSET(s, &wfds)) {
-                closesocket(s);
+            if (sel <= 0 || FD_ISSET(sg.get(), &efds) || !FD_ISSET(sg.get(), &wfds)) {
                 throw std::runtime_error("connect timeout/refused");
             }
             // select() write-ready doesn't guarantee success on Windows —
             // a RST can briefly appear writable. Verify via SO_ERROR.
             int sock_err = 0;
             int soe_len = sizeof(sock_err);
-            if (getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&sock_err), &soe_len) != 0 || sock_err != 0) {
-                closesocket(s);
+            if (getsockopt(sg.get(), SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&sock_err), &soe_len) != 0 || sock_err != 0) {
                 throw std::runtime_error("connect failed (SO_ERROR)");
             }
         }
         u_long blk = 0;
-        ioctlsocket(s, FIONBIO, &blk);
-        return s;
+        ioctlsocket(sg.get(), static_cast<long>(FIONBIO), &blk);
+        return sg.release();
     }
-    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        closesocket(s);
+    if (connect(sg.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         throw std::runtime_error("connect failed");
     }
-    return s;
+    return sg.release();
 }
 
-inline bool send_all(SOCKET s, const uint8_t* data, size_t len) {
+[[nodiscard]] inline bool send_all(SOCKET s, const uint8_t* data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         int chunk = static_cast<int>((std::min<size_t>)(len - sent, 0x40000000ULL));
@@ -521,7 +567,7 @@ inline bool send_all(SOCKET s, const uint8_t* data, size_t len) {
     return true;
 }
 
-inline bool recv_exact(SOCKET s, uint8_t* dst, size_t len) {
+[[nodiscard]] inline bool recv_exact(SOCKET s, uint8_t* dst, size_t len) {
     size_t got = 0;
     while (got < len) {
         int chunk = static_cast<int>((std::min<size_t>)(len - got, 0x40000000ULL));
@@ -532,40 +578,75 @@ inline bool recv_exact(SOCKET s, uint8_t* dst, size_t len) {
     return true;
 }
 
-inline std::string http_get_local(uint16_t port, const std::string& path) {
-    SOCKET s = connect_local(port, 50);
+[[nodiscard]] inline std::string http_get_local(uint16_t port, const std::string& path) {
+    SocketGuard sg(connect_local(port, 50));
     DWORD tv = 1000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+    setsockopt(sg.get(), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
     std::string req = "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) +
                       "\r\nConnection: close\r\n\r\n";
-    if (!send_all(s, reinterpret_cast<const uint8_t*>(req.data()), req.size())) {
-        closesocket(s);
+    if (!send_all(sg.get(), reinterpret_cast<const uint8_t*>(req.data()), req.size())) {
         throw std::runtime_error("HTTP send failed");
     }
     std::string raw;
     char buf[4096];
     size_t sep = std::string::npos;
+    size_t scan_pos = 0;
     size_t content_len = std::string::npos;
     while (true) {
-        int n = recv(s, buf, sizeof(buf), 0);
+        int n = recv(sg.get(), buf, sizeof(buf), 0);
         if (n <= 0) break;
         raw.append(buf, static_cast<size_t>(n));
         if (raw.size() > 64ULL * 1024 * 1024) {
-            closesocket(s);
             throw std::runtime_error("HTTP response too large");
         }
         if (sep == std::string::npos) {
-            sep = raw.find("\r\n\r\n");
-            if (sep != std::string::npos) {
+            sep = raw.find("\r\n\r\n", scan_pos);
+            if (sep == std::string::npos) {
+                scan_pos = (raw.size() >= 3) ? (raw.size() - 3) : 0;
+            } else {
                 std::string hdr_lower = to_lower_ascii(raw.substr(0, sep));
-                size_t cl_pos = hdr_lower.find("content-length:");
-                if (cl_pos != std::string::npos) {
-                    cl_pos += 15;
-                    while (cl_pos < hdr_lower.size() && (hdr_lower[cl_pos] == ' ' || hdr_lower[cl_pos] == '\t')) cl_pos++;
-                    uint64_t parsed_cl = std::strtoull(hdr_lower.c_str() + cl_pos, nullptr, 10);
-                    if (parsed_cl <= 64ULL * 1024 * 1024) {
+                size_t line_end = hdr_lower.find("\r\n");
+                std::string_view status_line = (line_end == std::string::npos)
+                    ? std::string_view(hdr_lower)
+                    : std::string_view(hdr_lower).substr(0, line_end);
+                if (!status_line.starts_with("http/1.") || status_line.size() < 12) {
+                    throw std::runtime_error("invalid HTTP status line");
+                }
+                size_t sp1 = status_line.find(' ');
+                if (sp1 == std::string_view::npos) throw std::runtime_error("invalid HTTP status line");
+                while (sp1 < status_line.size() && status_line[sp1] == ' ') ++sp1;
+                int status_code = 0;
+                auto [sp_ptr, sp_ec] = std::from_chars(
+                    status_line.data() + sp1, status_line.data() + status_line.size(), status_code);
+                if (sp_ec != std::errc{} || status_code < 200 || status_code >= 300) {
+                    throw std::runtime_error("HTTP error status: " + std::to_string(status_code));
+                }
+
+                // Parse headers line by line
+                size_t hpos = (line_end == std::string::npos) ? hdr_lower.size() : line_end + 2;
+                while (hpos < hdr_lower.size()) {
+                    size_t next_eol = hdr_lower.find("\r\n", hpos);
+                    std::string_view line = (next_eol == std::string::npos)
+                        ? std::string_view(hdr_lower).substr(hpos)
+                        : std::string_view(hdr_lower).substr(hpos, next_eol - hpos);
+                    if (line.starts_with("transfer-encoding:") &&
+                        line.find("chunked") != std::string_view::npos) {
+                        throw std::runtime_error("unsupported chunked transfer-encoding");
+                    }
+                    if (line.starts_with("content-length:")) {
+                        std::string_view val = line.substr(15);
+                        while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.remove_prefix(1);
+                        while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.remove_suffix(1);
+                        uint64_t parsed_cl = 0;
+                        auto [cl_ptr, cl_ec] = std::from_chars(val.data(), val.data() + val.size(), parsed_cl);
+                        if (cl_ec != std::errc{} || cl_ptr != val.data() + val.size() ||
+                            parsed_cl > 64ULL * 1024 * 1024) {
+                            throw std::runtime_error("invalid HTTP Content-Length");
+                        }
                         content_len = static_cast<size_t>(parsed_cl);
                     }
+                    if (next_eol == std::string::npos) break;
+                    hpos = next_eol + 2;
                 }
             }
         }
@@ -574,9 +655,11 @@ inline std::string http_get_local(uint16_t port, const std::string& path) {
             break;
         }
     }
-    closesocket(s);
     if (sep == std::string::npos) throw std::runtime_error("invalid HTTP response");
-    if (content_len != std::string::npos && raw.size() - (sep + 4) >= content_len) {
+    if (content_len != std::string::npos) {
+        if (raw.size() - (sep + 4) < content_len) {
+            throw std::runtime_error("truncated HTTP response body");
+        }
         return raw.substr(sep + 4, content_len);
     }
     return raw.substr(sep + 4);
@@ -584,82 +667,185 @@ inline std::string http_get_local(uint16_t port, const std::string& path) {
 
 struct WsClient {
     SOCKET s = INVALID_SOCKET;
+    std::vector<uint8_t> rx_buf;
+    size_t rx_off = 0;
 
-    ~WsClient() {
-        if (s != INVALID_SOCKET) closesocket(s);
+    WsClient() = default;
+    ~WsClient() { reset(); }
+    WsClient(const WsClient&) = delete;
+    WsClient& operator=(const WsClient&) = delete;
+    WsClient(WsClient&& o) noexcept
+        : s(std::exchange(o.s, INVALID_SOCKET)),
+          rx_buf(std::move(o.rx_buf)),
+          rx_off(std::exchange(o.rx_off, 0)) {}
+    WsClient& operator=(WsClient&& o) noexcept {
+        if (this != &o) {
+            reset();
+            s = std::exchange(o.s, INVALID_SOCKET);
+            rx_buf = std::move(o.rx_buf);
+            rx_off = std::exchange(o.rx_off, 0);
+        }
+        return *this;
     }
 
-    static WsClient connect_ws(const std::string& ws_url) {
-        const std::string prefix = "ws://";
-        if (ws_url.compare(0, prefix.size(), prefix) != 0) {
+    void reset() noexcept {
+        if (s != INVALID_SOCKET) {
+            closesocket(s);
+            s = INVALID_SOCKET;
+        }
+        rx_buf.clear();
+        rx_off = 0;
+    }
+
+    [[nodiscard]] bool read_exact_buffered(uint8_t* dst, size_t len) {
+        size_t got = 0;
+        if (rx_off < rx_buf.size()) {
+            size_t avail = rx_buf.size() - rx_off;
+            size_t take = (std::min)(avail, len);
+            std::memcpy(dst, rx_buf.data() + rx_off, take);
+            rx_off += take;
+            got += take;
+            if (rx_off == rx_buf.size()) {
+                rx_buf.clear();
+                rx_off = 0;
+            }
+        }
+        if (got < len) {
+            return recv_exact(s, dst + got, len - got);
+        }
+        return true;
+    }
+
+    [[nodiscard]] static WsClient connect_ws(const std::string& ws_url) {
+        const std::string_view prefix = "ws://";
+        if (!std::string_view(ws_url).starts_with(prefix)) {
             throw std::runtime_error("only ws:// supported for local CDP");
         }
-        std::string rest = ws_url.substr(prefix.size());
+        std::string_view rest = std::string_view(ws_url).substr(prefix.size());
         size_t slash = rest.find('/');
-        std::string host_port = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-        std::string path = (slash == std::string::npos) ? "/" : rest.substr(slash);
+        std::string_view host_port = (slash == std::string_view::npos) ? rest : rest.substr(0, slash);
+        std::string path = (slash == std::string_view::npos) ? "/" : std::string(rest.substr(slash));
         size_t colon = host_port.find(':');
-        if (colon == std::string::npos) throw std::runtime_error("missing port in ws url");
-        std::string host = host_port.substr(0, colon);
+        if (colon == std::string_view::npos) throw std::runtime_error("missing port in ws url");
+        std::string_view host = host_port.substr(0, colon);
         if (host != "127.0.0.1" && host != "localhost") {
             throw std::runtime_error("refusing non-loopback ws host");
         }
-        int port_i = std::stoi(host_port.substr(colon + 1));
-        if (port_i <= 0 || port_i > 65535) throw std::runtime_error("invalid port in ws url");
-        uint16_t port = static_cast<uint16_t>(port_i);
+        std::string_view port_sv = host_port.substr(colon + 1);
+        uint32_t port_u = 0;
+        auto [p_ptr, p_ec] = std::from_chars(port_sv.data(), port_sv.data() + port_sv.size(), port_u);
+        if (p_ec != std::errc{} || p_ptr != port_sv.data() + port_sv.size() || port_u == 0 || port_u > 65535) {
+            throw std::runtime_error("invalid port in ws url");
+        }
+        uint16_t port = static_cast<uint16_t>(port_u);
 
-        SOCKET s = connect_local(port);
+        SocketGuard sg(connect_local(port));
         BOOL nodelay = TRUE;
-        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+        setsockopt(sg.get(), IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+        DWORD hs_tv = 10000;
+        setsockopt(sg.get(), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&hs_tv), sizeof(hs_tv));
 
         uint8_t key_raw[16]{};
-        BCryptGenRandom(nullptr, key_raw, sizeof(key_raw), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (BCryptGenRandom(nullptr, key_raw, sizeof(key_raw), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+            throw std::runtime_error("BCryptGenRandom failed for Sec-WebSocket-Key");
+        }
         std::string key = win::base64_encode(key_raw, sizeof(key_raw));
-        std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + host_port +
+        std::string req = "GET " + path + " HTTP/1.1\r\nHost: " + std::string(host_port) +
                           "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " + key +
                           "\r\nSec-WebSocket-Version: 13\r\n\r\n";
-        if (!send_all(s, reinterpret_cast<const uint8_t*>(req.data()), req.size())) {
-            closesocket(s);
+        if (!send_all(sg.get(), reinterpret_cast<const uint8_t*>(req.data()), req.size())) {
             throw std::runtime_error("ws handshake send failed");
         }
 
         std::string hdr;
-        char c = 0;
-        while (hdr.size() < 4 || hdr.compare(hdr.size() - 4, 4, "\r\n\r\n") != 0) {
-            if (recv(s, &c, 1, 0) <= 0) {
-                closesocket(s);
+        char chunk[2048];
+        size_t hdr_end = std::string::npos;
+        size_t scan_pos = 0;
+        while (hdr_end == std::string::npos) {
+            int n = recv(sg.get(), chunk, sizeof(chunk), 0);
+            if (n <= 0) {
                 throw std::runtime_error("ws handshake EOF");
             }
-            hdr.push_back(c);
-            if (hdr.size() > 16384) {
-                closesocket(s);
-                throw std::runtime_error("ws handshake header too large");
+            hdr.append(chunk, static_cast<size_t>(n));
+            hdr_end = hdr.find("\r\n\r\n", scan_pos);
+            if (hdr_end == std::string::npos) {
+                if (hdr.size() > 16384) {
+                    throw std::runtime_error("ws handshake header too large");
+                }
+                scan_pos = (hdr.size() >= 3) ? (hdr.size() - 3) : 0;
             }
         }
-        // Validate the HTTP status line specifically — a naive find("101") would
-        // match in a header value or response body. The status line is always
-        // the first CRLF-terminated token of the upgrade response.
-        {
-            size_t crlf0 = hdr.find("\r\n");
-            std::string_view status_line = (crlf0 != std::string::npos)
-                ? std::string_view(hdr).substr(0, crlf0)
-                : std::string_view(hdr);
-            if (status_line.find("101") == std::string_view::npos) {
-                closesocket(s);
-                std::string snippet(status_line.substr(0, std::min(status_line.size(), size_t(64))));
-                throw std::runtime_error("ws upgrade failed: " + snippet);
-            }
+        if (hdr_end > 16384) {
+            throw std::runtime_error("ws handshake header too large");
         }
 
+        // Validate HTTP/1.1 101 status line, Upgrade/Connection headers, and Sec-WebSocket-Accept
+        std::string_view hdr_sv(hdr.data(), hdr_end);
+        size_t crlf0 = hdr_sv.find("\r\n");
+        std::string_view status_line = (crlf0 != std::string_view::npos) ? hdr_sv.substr(0, crlf0) : hdr_sv;
+        if (!status_line.starts_with("HTTP/1.1 101") ||
+            (status_line.size() > 12 && status_line[12] != ' ')) {
+            std::string snippet(status_line.substr(0, (std::min)(status_line.size(), size_t(64))));
+            throw std::runtime_error("ws upgrade failed: " + snippet);
+        }
+
+        std::string hdr_lower = to_lower_ascii(std::string(hdr_sv));
+        bool has_upgrade = false;
+        bool has_connection = false;
+        std::string accept_val;
+        size_t hpos = (crlf0 == std::string_view::npos) ? hdr_lower.size() : crlf0 + 2;
+        while (hpos < hdr_lower.size()) {
+            size_t next_eol = hdr_lower.find("\r\n", hpos);
+            std::string_view line_l = (next_eol == std::string_view::npos)
+                ? std::string_view(hdr_lower).substr(hpos)
+                : std::string_view(hdr_lower).substr(hpos, next_eol - hpos);
+            std::string_view line_orig = (next_eol == std::string_view::npos)
+                ? hdr_sv.substr(hpos)
+                : hdr_sv.substr(hpos, next_eol - hpos);
+            auto trim_sv = [](std::string_view v) {
+                while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.remove_prefix(1);
+                while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.remove_suffix(1);
+                return v;
+            };
+            if (line_l.starts_with("upgrade:") && trim_sv(line_l.substr(8)) == "websocket") {
+                has_upgrade = true;
+            } else if (line_l.starts_with("connection:") &&
+                       line_l.substr(11).find("upgrade") != std::string_view::npos) {
+                has_connection = true;
+            } else if (line_l.starts_with("sec-websocket-accept:")) {
+                accept_val = std::string(trim_sv(line_orig.substr(21)));
+            }
+            if (next_eol == std::string_view::npos) break;
+            hpos = next_eol + 2;
+        }
+        std::string accept_input = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+        auto accept_sha1 = win::sha1_raw(
+            reinterpret_cast<const uint8_t*>(accept_input.data()), accept_input.size());
+        std::string expected_accept = win::base64_encode(accept_sha1.data(), accept_sha1.size());
+        if (!has_upgrade || !has_connection || accept_val != expected_accept) {
+            throw std::runtime_error("ws handshake validation failed");
+        }
+
+        DWORD no_tv = 0;
+        setsockopt(sg.get(), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&no_tv), sizeof(no_tv));
+
         WsClient client;
-        client.s = s;
+        client.s = sg.release();
+        const size_t body_off = hdr_end + 4;
+        if (body_off < hdr.size()) {
+            client.rx_buf.assign(
+                reinterpret_cast<const uint8_t*>(hdr.data() + body_off),
+                reinterpret_cast<const uint8_t*>(hdr.data() + hdr.size()));
+        }
         return client;
     }
 
-    bool send_frame(uint8_t opcode, const uint8_t* payload, size_t len) {
+    [[nodiscard]] bool send_frame(uint8_t opcode, const uint8_t* payload, size_t len) {
         // RFC 6455 §5.3: masking key MUST be chosen unpredictably per frame.
         uint8_t mask[4]{};
-        BCryptGenRandom(nullptr, mask, sizeof(mask), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (BCryptGenRandom(nullptr, mask, sizeof(mask), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+            return false;
+        }
         std::vector<uint8_t> frame;
         frame.reserve(14 + len);
         frame.push_back(static_cast<uint8_t>(0x80 | opcode));
@@ -696,44 +882,42 @@ struct WsClient {
         return send_all(s, frame.data(), frame.size());
     }
 
-    bool send_text(const std::string& text) {
+    [[nodiscard]] bool send_text(const std::string& text) {
         return send_frame(0x1, reinterpret_cast<const uint8_t*>(text.data()), text.size());
     }
 
-    bool read_message(std::string& out, bool& closed) {
+    [[nodiscard]] bool read_message(std::string& out, bool& closed) {
         out.clear();
         closed = false;
         uint8_t first_op = 0;
+        constexpr uint64_t MAX_MESSAGE = 256ULL * 1024 * 1024; // 256 MiB
         while (true) {
             uint8_t hdr[2];
-            if (!recv_exact(s, hdr, 2)) return false;
+            if (!read_exact_buffered(hdr, 2)) return false;
             bool fin = (hdr[0] & 0x80) != 0;
             uint8_t opcode = hdr[0] & 0x0F;
             bool masked = (hdr[1] & 0x80) != 0;
             uint64_t len = hdr[1] & 0x7F;
             if (len == 126) {
                 uint8_t b[2];
-                if (!recv_exact(s, b, 2)) return false;
+                if (!read_exact_buffered(b, 2)) return false;
                 len = (static_cast<uint64_t>(b[0]) << 8) | b[1];
             } else if (len == 127) {
                 uint8_t b[8];
-                if (!recv_exact(s, b, 8)) return false;
+                if (!read_exact_buffered(b, 8)) return false;
                 len = 0;
                 for (int i = 0; i < 8; ++i) len = (len << 8) | b[i];
             }
-            // Guard against absurdly large frame lengths advertised by the
-            // server (e.g. a buggy or malicious CDP endpoint). Chrome CDP
-            // messages are always well under 256 MiB in practice.
-            constexpr uint64_t MAX_FRAME = 256u * 1024 * 1024; // 256 MiB
-            if (len > MAX_FRAME) return false;
+            // Enforce cumulative message limit across all continuation frames.
+            if (len > MAX_MESSAGE || len > MAX_MESSAGE - out.size()) return false;
             uint8_t mask[4]{};
-            if (masked && !recv_exact(s, mask, 4)) return false;
+            if (masked && !read_exact_buffered(mask, 4)) return false;
             // Receive directly into the output buffer instead of allocating a
             // temporary vector for every frame.
             const size_t base = out.size();
             out.resize(base + static_cast<size_t>(len));
             if (len > 0 &&
-                !recv_exact(s, reinterpret_cast<uint8_t*>(out.data() + base), static_cast<size_t>(len))) {
+                !read_exact_buffered(reinterpret_cast<uint8_t*>(out.data() + base), static_cast<size_t>(len))) {
                 out.resize(base);
                 return false;
             }
@@ -747,7 +931,10 @@ struct WsClient {
                 return false;
             }
             if (opcode == 0x9) {
-                send_frame(0xA, reinterpret_cast<const uint8_t*>(out.data() + base), static_cast<size_t>(len));
+                if (!send_frame(0xA, reinterpret_cast<const uint8_t*>(out.data() + base), static_cast<size_t>(len))) {
+                    out.resize(base);
+                    return false;
+                }
                 out.resize(base);
                 continue;
             }
@@ -788,6 +975,55 @@ struct JobGuard {
     }
 };
 
+[[nodiscard]] inline std::wstring quote_win_arg_w(std::wstring_view arg) {
+    if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring_view::npos) {
+        return std::wstring(arg);
+    }
+    std::wstring out;
+    out.push_back(L'"');
+    size_t backslashes = 0;
+    for (wchar_t ch : arg) {
+        if (ch == L'\\') {
+            ++backslashes;
+        } else if (ch == L'"') {
+            out.append(backslashes * 2 + 1, L'\\');
+            out.push_back(L'"');
+            backslashes = 0;
+        } else {
+            out.append(backslashes, L'\\');
+            out.push_back(ch);
+            backslashes = 0;
+        }
+    }
+    out.append(backslashes * 2, L'\\');
+    out.push_back(L'"');
+    return out;
+}
+
+struct ProcThreadAttrGuard {
+    std::vector<uint8_t> buf;
+    LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
+    bool initialized = false;
+
+    bool init(DWORD count) {
+        SIZE_T attr_size = 0;
+        InitializeProcThreadAttributeList(nullptr, count, 0, &attr_size);
+        if (attr_size == 0) return false;
+        buf.resize(attr_size);
+        list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(buf.data());
+        initialized = (InitializeProcThreadAttributeList(list, count, 0, &attr_size) != 0);
+        return initialized;
+    }
+    ~ProcThreadAttrGuard() {
+        if (initialized && list) {
+            DeleteProcThreadAttributeList(list);
+        }
+    }
+    ProcThreadAttrGuard() = default;
+    ProcThreadAttrGuard(const ProcThreadAttrGuard&) = delete;
+    ProcThreadAttrGuard& operator=(const ProcThreadAttrGuard&) = delete;
+};
+
 inline void launch_cdp_browser(
     const std::string& start_url,
     const std::string& version,
@@ -804,16 +1040,21 @@ inline void launch_cdp_browser(
     WsaGuard wsa;
     JobGuard job;
     std::wstring chrome = find_chrome_exe();
-    uint16_t port = free_local_port();
     create_directories_w(profile_dir);
 
-    vlog("chrome=" + win::wide_to_utf8(chrome) + " port=" + std::to_string(port));
+    std::wstring active_port_path = seb::join_path_w(profile_dir, L"DevToolsActivePort");
+    DeleteFileW(active_port_path.c_str());
 
-    std::string seb_short = version;
+    std::string clean_ver;
+    for (char c : version) {
+        if ((c >= '0' && c <= '9') || c == '.') clean_ver.push_back(c);
+    }
+    if (clean_ver.empty()) clean_ver = "3.10.0";
+    std::string seb_short = clean_ver;
     int dots = 0;
-    for (size_t i = 0; i < version.size(); ++i) {
-        if (version[i] == '.' && ++dots == 3) {
-            seb_short = version.substr(0, i);
+    for (size_t i = 0; i < clean_ver.size(); ++i) {
+        if (clean_ver[i] == '.' && ++dots == 3) {
+            seb_short = clean_ver.substr(0, i);
             break;
         }
     }
@@ -821,23 +1062,32 @@ inline void launch_cdp_browser(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) SEB/" +
         seb_short + " (x64)";
 
-    std::wstring cmdline = L"\"" + chrome + L"\"" +
-                           L" --user-data-dir=\"" + profile_dir + L"\"" +
-                           L" --remote-debugging-port=" + std::to_wstring(port) +
-                           L" --user-agent=\"" + win::utf8_to_wide(user_agent) + L"\"" +
-                           L" --disable-blink-features=AutomationControlled" +
-                           L" --disable-infobars" +
-                           L" --disable-background-networking" +
-                           L" --disable-client-side-phishing-detection" +
-                           L" --disable-default-apps" +
-                           L" --disable-hang-monitor" +
-                           L" --disable-popup-blocking" +
-                           L" --disable-prompt-on-repost" +
-                           L" --disable-sync" +
-                           L" --metrics-recording-only" +
-                           L" --password-store=basic" +
-                           L" --use-mock-keychain" +
-                           L" --no-first-run --no-default-browser-check about:blank";
+    std::wstring cmdline = quote_win_arg_w(chrome);
+    auto append_arg = [&](std::wstring_view arg) {
+        cmdline.push_back(L' ');
+        cmdline.append(quote_win_arg_w(arg));
+    };
+    append_arg(L"--user-data-dir=" + profile_dir);
+    append_arg(L"--remote-debugging-port=0");
+    append_arg(L"--user-agent=" + win::utf8_to_wide(user_agent));
+    for (const wchar_t* flag : {
+             L"--disable-blink-features=AutomationControlled",
+             L"--disable-infobars",
+             L"--disable-background-networking",
+             L"--disable-client-side-phishing-detection",
+             L"--disable-default-apps",
+             L"--disable-hang-monitor",
+             L"--disable-popup-blocking",
+             L"--disable-prompt-on-repost",
+             L"--disable-sync",
+             L"--metrics-recording-only",
+             L"--password-store=basic",
+             L"--use-mock-keychain",
+             L"--no-first-run",
+             L"--no-default-browser-check",
+             L"about:blank"}) {
+        append_arg(flag);
+    }
 
     // Apply safe child-process mitigations to Chrome/Edge via STARTUPINFOEXW
     // (heap termination, high-entropy ASLR, forced image relocation). Do not
@@ -851,23 +1101,18 @@ inline void launch_cdp_browser(
         static_cast<DWORD64>(PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_ON) |
         static_cast<DWORD64>(PROCESS_CREATION_MITIGATION_POLICY_FORCE_RELOCATE_IMAGES_ALWAYS_ON) |
         PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
-    SIZE_T attr_size = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
-    std::vector<uint8_t> attr_buf(attr_size);
-    LPPROC_THREAD_ATTRIBUTE_LIST attr_list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
-    bool has_attrs = attr_size > 0 &&
-        InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_size) &&
+    ProcThreadAttrGuard attr_guard;
+    const bool has_attrs = attr_guard.init(1) &&
         UpdateProcThreadAttribute(
-            attr_list, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+            attr_guard.list, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
             &child_mitigations, sizeof(child_mitigations), nullptr, nullptr);
-    if (has_attrs) sie.lpAttributeList = attr_list;
+    if (has_attrs) sie.lpAttributeList = attr_guard.list;
 
     PROCESS_INFORMATION pi{};
     DWORD create_flags = CREATE_SUSPENDED | (has_attrs ? EXTENDED_STARTUPINFO_PRESENT : 0);
     BOOL launched = CreateProcessW(
-        nullptr, cmdline.data(), nullptr, nullptr, FALSE, create_flags,
+        chrome.c_str(), cmdline.data(), nullptr, nullptr, FALSE, create_flags,
         nullptr, nullptr, &sie.StartupInfo, &pi);
-    if (has_attrs) DeleteProcThreadAttributeList(attr_list);
     if (!launched) {
         throw std::runtime_error("failed to launch browser");
     }
@@ -878,44 +1123,57 @@ inline void launch_cdp_browser(
     vlog("launched browser pid=" + std::to_string(pi.dwProcessId) + " (bound to KILL_ON_JOB_CLOSE job)");
 
     DWORD start_tick = GetTickCount();
+    uint16_t port = 0;
     std::string ws_url;
     while (GetTickCount() - start_tick < 15000) {
         try {
-            std::string body = http_get_local(port, "/json/list");
-            auto val = json::parse(body);
-            if (const auto* arr = val.as_arr()) {
-                for (const auto& t : *arr) {
-                    const auto* typ = t.get("type");
-                    const auto* ws = t.get("webSocketDebuggerUrl");
-                    if (typ && typ->as_str() && *typ->as_str() == "page" && ws && ws->as_str()) {
-                        ws_url = *ws->as_str();
-                        break;
+            if (seb::is_file_w(active_port_path.c_str())) {
+                auto bytes = nt::nt_read_file_bytes_w(active_port_path.c_str(), 65536);
+                std::string_view sv(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+                size_t nl1 = sv.find('\n');
+                if (nl1 != std::string_view::npos) {
+                    std::string_view p_line = sv.substr(0, nl1);
+                    if (!p_line.empty() && p_line.back() == '\r') p_line.remove_suffix(1);
+                    uint32_t parsed_port = 0;
+                    auto [pp, ec] = std::from_chars(p_line.data(), p_line.data() + p_line.size(), parsed_port);
+                    if (ec == std::errc{} && pp == p_line.data() + p_line.size() &&
+                        parsed_port > 0 && parsed_port <= 65535) {
+                        port = static_cast<uint16_t>(parsed_port);
+                        std::string_view rest = sv.substr(nl1 + 1);
+                        size_t nl2 = rest.find_first_of("\r\n");
+                        std::string_view ws_path = (nl2 == std::string_view::npos) ? rest : rest.substr(0, nl2);
+                        if (!ws_path.empty() && ws_path.front() == '/') {
+                            ws_url = "ws://127.0.0.1:" + std::to_string(port) + std::string(ws_path);
+                            break;
+                        }
                     }
                 }
             }
-            if (!ws_url.empty()) break;
         } catch (...) {}
         nt::nt_sleep_ms(20);
     }
 
     if (ws_url.empty()) {
         TerminateProcess(proc_h.get(), 1);
-        throw std::runtime_error("timed out waiting for Chrome CDP");
+        throw std::runtime_error("timed out waiting for Chrome CDP DevToolsActivePort");
     }
 
+    vlog("chrome=" + win::wide_to_utf8(chrome) + " port=" + std::to_string(port));
     WsClient ws = WsClient::connect_ws(ws_url);
     vlog("connected ws=" + ws_url);
     std::string defuser_tag = build_defuser_tag();
     uint64_t cmd_id = 1;
 
-    auto send_cdp = [&](const std::string& method, json::JsonVal params, const std::string& session_id = "") {
+    auto send_cdp = [&](const std::string& method, json::JsonVal params, const std::string& session_id = "") -> uint64_t {
         uint64_t id = cmd_id++;
         json::JsonObj obj;
         obj.emplace_back("id", json::JsonVal(id));
         obj.emplace_back("method", json::JsonVal(method));
         obj.emplace_back("params", std::move(params));
         if (!session_id.empty()) obj.emplace_back("sessionId", session_id);
-        ws.send_text(json::stringify(json::JsonVal(std::move(obj))));
+        if (!ws.send_text(json::stringify(json::JsonVal(std::move(obj))))) {
+            throw std::runtime_error("CDP send_text failed for " + method);
+        }
         return id;
     };
 
@@ -949,8 +1207,12 @@ inline void launch_cdp_browser(
         }
     };
 
-    enable_page_hooks("");
-    vlog("enabled Fetch (" + route_pattern + "), Security.setIgnoreCertificateErrors, STEALTH_JS");
+    {
+        json::JsonObj sec_params;
+        sec_params.emplace_back("ignore", true);
+        send_cdp("Security.setIgnoreCertificateErrors", json::JsonVal(std::move(sec_params)));
+    }
+    bool navigated = false;
     {
         json::JsonObj aa;
         aa.emplace_back("autoAttach", true);
@@ -958,12 +1220,7 @@ inline void launch_cdp_browser(
         aa.emplace_back("flatten", true);
         send_cdp("Target.setAutoAttach", json::JsonVal(std::move(aa)));
     }
-    {
-        json::JsonObj nav_params;
-        nav_params.emplace_back("url", start_url);
-        send_cdp("Page.navigate", json::JsonVal(std::move(nav_params)));
-    }
-    vlog("navigating to " + start_url);
+    vlog("enabled browser-level Target.setAutoAttach + Security.setIgnoreCertificateErrors");
 
     std::unordered_map<std::string, std::pair<std::string, std::string>> header_cache;
     header_cache.reserve(512);
@@ -1005,22 +1262,33 @@ inline void launch_cdp_browser(
                         if (const auto* f = res->get("base64Encoded"); f && f->as_bool()) b64 = *f->as_bool();
                     }
                     std::string html;
-                    if (b64) {
-                        auto decoded = win::base64_decode(body_str);
-                        html.assign(reinterpret_cast<const char*>(decoded.data()), decoded.size());
-                    } else {
-                        html = std::move(body_str);
-                    }
-                    std::string modified = inject_defuser_html(html, defuser_tag);
-                    if (verbose) {
-                        vlog("injected DEFUSER_JS (" + std::to_string(html.size()) + " -> " +
-                             std::to_string(modified.size()) + " bytes)");
+                    std::string body_b64;
+                    try {
+                        if (b64) {
+                            auto decoded = win::base64_decode(body_str);
+                            html.assign(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+                        } else {
+                            html = std::move(body_str);
+                        }
+                        std::string modified = inject_defuser_html(html, defuser_tag);
+                        if (verbose) {
+                            vlog("injected DEFUSER_JS (" + std::to_string(html.size()) + " -> " +
+                                 std::to_string(modified.size()) + " bytes)");
+                        }
+                        body_b64 = win::base64_encode(
+                            reinterpret_cast<const uint8_t*>(modified.data()), modified.size());
+                    } catch (...) {
+                        json::JsonObj cp;
+                        cp.emplace_back("requestId", pb.request_id);
+                        send_cdp("Fetch.continueResponse", json::JsonVal(std::move(cp)), pb.session_id);
+                        continue;
                     }
 
                     json::JsonArr resp_headers;
                     for (const auto& [k, v] : pb.headers) {
                         std::string kl = to_lower_ascii(k);
                         if (kl == "content-encoding" || kl == "content-length" ||
+                            kl == "transfer-encoding" ||
                             kl == "content-security-policy" || kl == "content-security-policy-report-only") {
                             continue;
                         }
@@ -1034,7 +1302,7 @@ inline void launch_cdp_browser(
                     fp.emplace_back("requestId", pb.request_id);
                     fp.emplace_back("responseCode", pb.status);
                     fp.emplace_back("responseHeaders", std::move(resp_headers));
-                    fp.emplace_back("body", win::base64_encode(reinterpret_cast<const uint8_t*>(modified.data()), modified.size()));
+                    fp.emplace_back("body", std::move(body_b64));
                     send_cdp("Fetch.fulfillRequest", json::JsonVal(std::move(fp)), pb.session_id);
                 }
             }
@@ -1057,6 +1325,13 @@ inline void launch_cdp_browser(
                 if (child_sid && child_sid->as_str() && typ && typ->as_str() && *typ->as_str() == "page") {
                     if (verbose) vlog("attached popup/tab sessionId=" + *child_sid->as_str());
                     enable_page_hooks(*child_sid->as_str());
+                    if (!navigated) {
+                        navigated = true;
+                        json::JsonObj nav_params;
+                        nav_params.emplace_back("url", start_url);
+                        send_cdp("Page.navigate", json::JsonVal(std::move(nav_params)), *child_sid->as_str());
+                        vlog("navigating to " + start_url);
+                    }
                 }
             }
             continue;
@@ -1089,20 +1364,11 @@ inline void launch_cdp_browser(
                     headers.emplace_back(std::move(name), std::move(val));
                 }
             }
-            if (is_html) {
+            if (is_html && pending_bodies.size() < 256) {
                 json::JsonObj gp;
                 gp.emplace_back("requestId", request_id);
                 uint64_t bid = send_cdp("Fetch.getResponseBody", json::JsonVal(std::move(gp)), session_id);
-                // Cap the map to prevent unbounded growth if CDP ids are
-                // issued faster than responses arrive (e.g. rapid navigation).
-                if (pending_bodies.size() < 256) {
-                    pending_bodies.emplace(bid, PendingBody{request_id, session_id, status, std::move(headers)});
-                } else {
-                    // Map full — just continue the response unmodified.
-                    json::JsonObj cp2;
-                    cp2.emplace_back("requestId", request_id);
-                    send_cdp("Fetch.continueResponse", json::JsonVal(std::move(cp2)), session_id);
-                }
+                pending_bodies.emplace(bid, PendingBody{request_id, session_id, status, std::move(headers)});
             } else {
                 json::JsonObj cp;
                 cp.emplace_back("requestId", request_id);

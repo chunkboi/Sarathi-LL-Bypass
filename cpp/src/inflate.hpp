@@ -4,10 +4,13 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
 namespace seb::inflate {
+
+inline constexpr size_t MAX_INFLATE_SIZE = 128ULL * 1024 * 1024;
 
 struct BitReader {
     const uint8_t* data;
@@ -61,13 +64,20 @@ struct BitReader {
         byte_pos -= buffered;
         bit_buf = 0;
         bit_cnt = 0;
-        if (byte_pos + count > len) {
+        if (count > len - byte_pos) {
             throw std::runtime_error("unexpected EOF in stored block");
+        }
+        if (count > MAX_INFLATE_SIZE - out.size()) {
+            throw std::runtime_error("decompressed size limit exceeded");
         }
         size_t old_sz = out.size();
         out.resize(old_sz + count);
         if (count > 0) std::memcpy(out.data() + old_sz, data + byte_pos, count);
         byte_pos += count;
+    }
+
+    [[nodiscard]] inline size_t bytes_consumed() const noexcept {
+        return byte_pos - static_cast<size_t>(bit_cnt / 8);
     }
 };
 
@@ -89,10 +99,10 @@ struct HuffTable {
         }
         std::array<uint16_t, 16> offs{};
         int32_t left = 1;
-        for (int bits = 1; bits < 16; ++bits) {
+        for (size_t bits = 1; bits < 16; ++bits) {
             left = (left << 1) - static_cast<int32_t>(t.counts[bits]);
             if (left < 0) throw std::runtime_error("oversubscribed huffman tree");
-            offs[bits] = offs[bits - 1] + t.counts[bits - 1];
+            offs[bits] = static_cast<uint16_t>(offs[bits - 1] + t.counts[bits - 1]);
         }
         size_t total = 0;
         for (uint16_t c : t.counts) total += c;
@@ -100,7 +110,7 @@ struct HuffTable {
 
         std::array<uint16_t, 16> next_code{};
         uint16_t code = 0;
-        for (int bits = 1; bits < 16; ++bits) {
+        for (size_t bits = 1; bits < 16; ++bits) {
             code = static_cast<uint16_t>((code + t.counts[bits - 1]) << 1);
             next_code[bits] = code;
         }
@@ -114,7 +124,8 @@ struct HuffTable {
             if (l <= LUT_BITS) {
                 uint16_t rev = 0;
                 for (uint8_t b = 0; b < l; ++b) {
-                    rev = static_cast<uint16_t>((rev << 1) | ((c >> b) & 1u));
+                    rev = static_cast<uint16_t>(
+                        (static_cast<unsigned>(rev) << 1) | ((static_cast<unsigned>(c) >> b) & 1u));
                 }
                 uint16_t entry = static_cast<uint16_t>((static_cast<uint16_t>(l) << 9) | static_cast<uint16_t>(sym));
                 uint16_t step = static_cast<uint16_t>(1u << l);
@@ -140,7 +151,7 @@ struct HuffTable {
         int32_t code = 0;
         int32_t first = 0;
         int32_t index = 0;
-        for (int len = 1; len < 16; ++len) {
+        for (size_t len = 1; len < 16; ++len) {
             code |= static_cast<int32_t>(br.read_bits(1));
             int32_t count = static_cast<int32_t>(counts[len]);
             if (code - count < first) {
@@ -156,7 +167,13 @@ struct HuffTable {
     }
 };
 
-inline std::vector<uint8_t> inflate_raw(const uint8_t* data, size_t len, size_t hint_size = 0) {
+namespace detail {
+[[nodiscard]] inline std::vector<uint8_t> inflate_raw_impl(
+    const uint8_t* data,
+    size_t len,
+    size_t hint_size,
+    size_t* bytes_consumed_out
+) {
     static constexpr std::array<uint16_t, 29> LEN_BASE = {
         3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
         67, 83, 99, 115, 131, 163, 195, 227, 258
@@ -177,7 +194,8 @@ inline std::vector<uint8_t> inflate_raw(const uint8_t* data, size_t len, size_t 
 
     BitReader br{data, len};
     std::vector<uint8_t> out;
-    size_t init_cap = hint_size ? hint_size : len * 3;
+    const size_t max_reserve = (len <= (SIZE_MAX - 4096) / 64) ? (len * 64 + 4096) : (64ULL * 1024 * 1024);
+    size_t init_cap = hint_size ? (std::min)(hint_size, max_reserve) : (std::min)(len * 3, max_reserve);
     if (init_cap > 64ULL * 1024 * 1024) init_cap = 64ULL * 1024 * 1024;
     out.reserve(init_cap);
 
@@ -249,7 +267,6 @@ inline std::vector<uint8_t> inflate_raw(const uint8_t* data, size_t len, size_t 
             }
 
             while (true) {
-                constexpr size_t MAX_INFLATE_SIZE = 128ULL * 1024 * 1024;
                 uint16_t sym = lit_table.decode(br);
                 if (sym < 256) {
                     if (out.size() >= MAX_INFLATE_SIZE) throw std::runtime_error("decompressed size limit exceeded");
@@ -282,42 +299,100 @@ inline std::vector<uint8_t> inflate_raw(const uint8_t* data, size_t len, size_t 
         if (bfinal != 0) break;
     }
 
+    if (bytes_consumed_out) {
+        *bytes_consumed_out = br.bytes_consumed();
+    }
     return out;
 }
+} // namespace detail
 
-inline std::vector<uint8_t> gzip_decompress(const uint8_t* data, size_t len) {
-    if (len < 18 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 8) {
+inline constexpr std::array<uint32_t, 256> make_crc32_table() {
+    std::array<uint32_t, 256> tbl{};
+    for (uint32_t i = 0; i < 256; ++i) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; ++k) {
+            c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        }
+        tbl[i] = c;
+    }
+    return tbl;
+}
+
+inline constexpr std::array<uint32_t, 256> CRC32_TABLE = make_crc32_table();
+
+[[nodiscard]] inline uint32_t crc32(const uint8_t* data, size_t len) noexcept {
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i) {
+        c = CRC32_TABLE[(c ^ data[i]) & 0xFFu] ^ (c >> 8);
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+[[nodiscard]] inline std::vector<uint8_t> inflate_raw(const uint8_t* data, size_t len, size_t hint_size = 0) {
+    return detail::inflate_raw_impl(data, len, hint_size, nullptr);
+}
+
+[[nodiscard]] inline std::vector<uint8_t> gzip_decompress(const uint8_t* data, size_t len) {
+    if (!data || len < 18 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 8) {
         throw std::runtime_error("invalid gzip header");
     }
     uint8_t flg = data[3];
     size_t pos = 10;
     if (flg & 0x04) {
-        if (pos + 2 > len) throw std::runtime_error("truncated gzip FEXTRA");
+        if (2 > len - pos) throw std::runtime_error("truncated gzip FEXTRA");
         uint16_t xlen = static_cast<uint16_t>(data[pos] | (data[pos + 1] << 8));
-        pos += 2 + xlen;
+        pos += 2;
+        if (xlen > len - pos) throw std::runtime_error("truncated gzip FEXTRA payload");
+        pos += xlen;
     }
     if (flg & 0x08) {
         while (pos < len && data[pos] != 0) pos++;
+        if (pos >= len) throw std::runtime_error("unterminated gzip FNAME");
         pos++;
     }
     if (flg & 0x10) {
         while (pos < len && data[pos] != 0) pos++;
+        if (pos >= len) throw std::runtime_error("unterminated gzip FCOMMENT");
         pos++;
     }
     if (flg & 0x02) {
+        if (2 > len - pos) throw std::runtime_error("truncated gzip FHCRC");
+        uint16_t fhcrc = static_cast<uint16_t>(data[pos] | (data[pos + 1] << 8));
+        if (static_cast<uint16_t>(crc32(data, pos) & 0xFFFFu) != fhcrc) {
+            throw std::runtime_error("gzip FHCRC mismatch");
+        }
         pos += 2;
     }
     if (pos > len - 8) {
         throw std::runtime_error("truncated gzip stream");
     }
-    uint32_t isize = static_cast<uint32_t>(data[len - 4]) |
-                     (static_cast<uint32_t>(data[len - 3]) << 8) |
-                     (static_cast<uint32_t>(data[len - 2]) << 16) |
-                     (static_cast<uint32_t>(data[len - 1]) << 24);
-    return inflate_raw(data + pos, len - 8 - pos, isize);
+    const uint32_t expected_crc =
+        static_cast<uint32_t>(data[len - 8]) |
+        (static_cast<uint32_t>(data[len - 7]) << 8) |
+        (static_cast<uint32_t>(data[len - 6]) << 16) |
+        (static_cast<uint32_t>(data[len - 5]) << 24);
+    const uint32_t isize =
+        static_cast<uint32_t>(data[len - 4]) |
+        (static_cast<uint32_t>(data[len - 3]) << 8) |
+        (static_cast<uint32_t>(data[len - 2]) << 16) |
+        (static_cast<uint32_t>(data[len - 1]) << 24);
+
+    const size_t deflate_len = len - 8 - pos;
+    size_t consumed = 0;
+    std::vector<uint8_t> out = detail::inflate_raw_impl(data + pos, deflate_len, isize, &consumed);
+    if (consumed != deflate_len) {
+        throw std::runtime_error("trailing bytes in gzip deflate stream");
+    }
+    if (static_cast<uint32_t>(out.size() & 0xFFFFFFFFu) != isize) {
+        throw std::runtime_error("gzip ISIZE mismatch");
+    }
+    if (crc32(out.data(), out.size()) != expected_crc) {
+        throw std::runtime_error("gzip CRC-32 mismatch");
+    }
+    return out;
 }
 
-inline std::vector<uint8_t> gzip_decompress(const std::vector<uint8_t>& data) {
+[[nodiscard]] inline std::vector<uint8_t> gzip_decompress(const std::vector<uint8_t>& data) {
     return gzip_decompress(data.data(), data.size());
 }
 

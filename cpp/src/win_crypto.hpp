@@ -1,7 +1,7 @@
 #pragma once
 
 #ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0601
+#define _WIN32_WINNT 0x0A00
 #endif
 
 #include "win_nt.hpp"
@@ -17,7 +17,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -33,56 +35,170 @@ namespace seb::win {
 using WinHandle = nt::NtHandle;
 using MappedFile = nt::NtMappedFile;
 
-// Pins sensitive memory pages in RAM (preventing paging to pagefile.sys) and
-// securely wipes + unlocks them when leaving scope.
+inline void wipe_bytes(void* ptr, size_t len) noexcept {
+    if (ptr && len > 0) {
+        SecureZeroMemory(ptr, len);
+    }
+}
+
+inline void wipe_string(std::string& s) noexcept {
+    if (s.capacity() > 0) {
+        s.resize(s.capacity(), '\0');
+        SecureZeroMemory(s.data(), s.size());
+    }
+    s.clear();
+}
+
+inline void wipe_vector(std::vector<uint8_t>& v) noexcept {
+    if (v.capacity() > 0) {
+        v.resize(v.capacity(), 0);
+        SecureZeroMemory(v.data(), v.size());
+    }
+    v.clear();
+}
+
+struct SecureZeroGuard {
+    void* ptr = nullptr;
+    size_t len = 0;
+
+    SecureZeroGuard() = default;
+    SecureZeroGuard(void* p, size_t n) noexcept : ptr(p), len(n) {}
+    ~SecureZeroGuard() { wipe_bytes(ptr, len); }
+    SecureZeroGuard(const SecureZeroGuard&) = delete;
+    SecureZeroGuard& operator=(const SecureZeroGuard&) = delete;
+};
+
+struct SecureStringGuard {
+    std::string& ref;
+    explicit SecureStringGuard(std::string& s) noexcept : ref(s) {}
+    ~SecureStringGuard() { wipe_string(ref); }
+    SecureStringGuard(const SecureStringGuard&) = delete;
+    SecureStringGuard& operator=(const SecureStringGuard&) = delete;
+};
+
+struct SecureVectorGuard {
+    std::vector<uint8_t>& ref;
+    explicit SecureVectorGuard(std::vector<uint8_t>& v) noexcept : ref(v) {}
+    ~SecureVectorGuard() { wipe_vector(ref); }
+    SecureVectorGuard(const SecureVectorGuard&) = delete;
+    SecureVectorGuard& operator=(const SecureVectorGuard&) = delete;
+};
+
+// Page-isolated RAM-pinned secret buffer. Using dedicated VirtualAlloc pages
+// ensures VirtualUnlock never prematurely unlocks unrelated stack/heap secrets.
+struct LockedBuffer {
+    uint8_t* ptr = nullptr;
+    size_t size_ = 0;
+    size_t alloc_size_ = 0;
+    bool locked_ = false;
+
+    LockedBuffer() = default;
+    explicit LockedBuffer(size_t n) : size_(n) {
+        if (n > 0) {
+            SYSTEM_INFO si{};
+            GetSystemInfo(&si);
+            size_t page_sz = si.dwPageSize ? si.dwPageSize : 4096;
+            alloc_size_ = ((n + page_sz - 1) / page_sz) * page_sz;
+            ptr = static_cast<uint8_t*>(VirtualAlloc(nullptr, alloc_size_, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            if (!ptr) throw std::bad_alloc();
+            locked_ = (VirtualLock(ptr, alloc_size_) != 0);
+        }
+    }
+    ~LockedBuffer() { reset(); }
+    void reset() noexcept {
+        if (ptr) {
+            SecureZeroMemory(ptr, alloc_size_);
+            if (locked_) VirtualUnlock(ptr, alloc_size_);
+            VirtualFree(ptr, 0, MEM_RELEASE);
+            ptr = nullptr;
+            size_ = 0;
+            alloc_size_ = 0;
+            locked_ = false;
+        }
+    }
+    LockedBuffer(const LockedBuffer&) = delete;
+    LockedBuffer& operator=(const LockedBuffer&) = delete;
+    LockedBuffer(LockedBuffer&& o) noexcept
+        : ptr(std::exchange(o.ptr, nullptr)),
+          size_(std::exchange(o.size_, 0)),
+          alloc_size_(std::exchange(o.alloc_size_, 0)),
+          locked_(std::exchange(o.locked_, false)) {}
+    LockedBuffer& operator=(LockedBuffer&& o) noexcept {
+        if (this != &o) {
+            reset();
+            ptr = std::exchange(o.ptr, nullptr);
+            size_ = std::exchange(o.size_, 0);
+            alloc_size_ = std::exchange(o.alloc_size_, 0);
+            locked_ = std::exchange(o.locked_, false);
+        }
+        return *this;
+    }
+
+    uint8_t* data() noexcept { return ptr; }
+    const uint8_t* data() const noexcept { return ptr; }
+    size_t size() const noexcept { return size_; }
+};
+
+// Pins a memory range in RAM and securely wipes it on scope exit.
+// Note: VirtualUnlock is intentionally NOT called on arbitrary shared stack/heap
+// pages because Windows VirtualLock/VirtualUnlock are page-granular and not
+// reference-counted; unlocking a shared page could unlock another active secret.
 struct MemoryLockGuard {
     void* ptr = nullptr;
     size_t len = 0;
-    bool locked = false;
 
-    MemoryLockGuard(void* p, size_t n) : ptr(p), len(n) {
+    MemoryLockGuard(void* p, size_t n) noexcept : ptr(p), len(n) {
         if (ptr && len > 0) {
-            locked = (VirtualLock(ptr, len) != 0);
+            (void)VirtualLock(ptr, len);
         }
     }
     ~MemoryLockGuard() {
-        if (ptr && len > 0) {
-            SecureZeroMemory(ptr, len);
-            if (locked) VirtualUnlock(ptr, len);
-        }
+        wipe_bytes(ptr, len);
     }
     MemoryLockGuard(const MemoryLockGuard&) = delete;
     MemoryLockGuard& operator=(const MemoryLockGuard&) = delete;
 };
 
-inline std::vector<uint8_t> read_file_bytes_w(const wchar_t* path) {
+[[nodiscard]] inline std::vector<uint8_t> read_file_bytes_w(const wchar_t* path) {
     return nt::nt_read_file_bytes_w(path);
 }
 
-inline bool write_file_bytes_w(const wchar_t* path, const void* data, size_t len) {
+[[nodiscard]] inline bool write_file_bytes_w(const wchar_t* path, const void* data, size_t len) {
     return nt::nt_write_file_bytes_w(path, data, len);
 }
 
-inline std::wstring utf8_to_wide(std::string_view s) {
+[[nodiscard]] inline std::wstring utf8_to_wide(std::string_view s) {
     if (s.empty()) return {};
+    if (s.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        throw std::runtime_error("utf8_to_wide input too large");
+    }
     int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (len <= 0) throw std::runtime_error("MultiByteToWideChar size failed");
     std::wstring out(static_cast<size_t>(len), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), len);
+    if (MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), len) <= 0) {
+        throw std::runtime_error("MultiByteToWideChar convert failed");
+    }
     return out;
 }
 
-inline std::string wide_to_utf8(std::wstring_view w) {
+[[nodiscard]] inline std::string wide_to_utf8(std::wstring_view w) {
     if (w.empty()) return {};
+    if (w.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+        throw std::runtime_error("wide_to_utf8 input too large");
+    }
     int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    if (len <= 0) throw std::runtime_error("WideCharToMultiByte size failed");
     std::string out(static_cast<size_t>(len), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), len, nullptr, nullptr);
+    if (WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), len, nullptr, nullptr) <= 0) {
+        throw std::runtime_error("WideCharToMultiByte convert failed");
+    }
     return out;
 }
 
 inline constexpr std::array<uint16_t, 256> make_hex_lut() {
     std::array<uint16_t, 256> lut{};
     constexpr char H[] = "0123456789abcdef";
-    for (int i = 0; i < 256; ++i) {
+    for (size_t i = 0; i < 256; ++i) {
         uint16_t lo = static_cast<uint8_t>(H[i >> 4]);
         uint16_t hi = static_cast<uint8_t>(H[i & 0x0F]);
         lut[i] = static_cast<uint16_t>(lo | (hi << 8));
@@ -176,6 +292,32 @@ inline BCRYPT_ALG_HANDLE hmac_sha1_alg() {
     return a.h;
 }
 
+inline BCRYPT_ALG_HANDLE sha1_alg() {
+    static AlgHandle a(BCRYPT_SHA1_ALGORITHM, 0);
+    if (!a.h) throw std::runtime_error("BCryptOpenAlgorithmProvider SHA1 failed");
+    return a.h;
+}
+
+struct BCryptHashGuard {
+    BCRYPT_HASH_HANDLE h = nullptr;
+    BCryptHashGuard() = default;
+    ~BCryptHashGuard() {
+        if (h) BCryptDestroyHash(h);
+    }
+    BCryptHashGuard(const BCryptHashGuard&) = delete;
+    BCryptHashGuard& operator=(const BCryptHashGuard&) = delete;
+};
+
+struct BCryptKeyGuard {
+    BCRYPT_KEY_HANDLE h = nullptr;
+    BCryptKeyGuard() = default;
+    ~BCryptKeyGuard() {
+        if (h) BCryptDestroyKey(h);
+    }
+    BCryptKeyGuard(const BCryptKeyGuard&) = delete;
+    BCryptKeyGuard& operator=(const BCryptKeyGuard&) = delete;
+};
+
 inline BCRYPT_ALG_HANDLE aes_cbc_alg() {
     static struct AesInit {
         BCRYPT_ALG_HANDLE h = nullptr;
@@ -200,29 +342,59 @@ inline BCRYPT_ALG_HANDLE aes_cbc_alg() {
 }
 } // namespace detail
 
-inline std::array<uint8_t, 32> sha256_raw(const uint8_t* data, size_t len) {
+[[nodiscard]] inline std::array<uint8_t, 20> sha1_raw(const uint8_t* data, size_t len) {
+    detail::BCryptHashGuard hg;
+    if (BCryptCreateHash(detail::sha1_alg(), &hg.h, nullptr, 0, nullptr, 0, 0) != 0) {
+        throw std::runtime_error("BCryptCreateHash SHA1 failed");
+    }
+    std::array<uint8_t, 20> out{};
+    NTSTATUS st = 0;
+    uint8_t dummy = 0;
+    if (len == 0) {
+        st = BCryptHashData(hg.h, &dummy, 0, 0);
+    } else {
+        if (!data) throw std::runtime_error("null SHA1 input");
+        size_t off = 0;
+        while (off < len) {
+            ULONG chunk = static_cast<ULONG>((std::min<size_t>)(len - off, 0x40000000ULL));
+            st = BCryptHashData(hg.h, const_cast<PUCHAR>(data + off), chunk, 0);
+            if (st != 0) break;
+            off += chunk;
+        }
+    }
+    if (st == 0) st = BCryptFinishHash(hg.h, out.data(), 20, 0);
+    if (st != 0) throw std::runtime_error("BCryptHash SHA1 failed");
+    return out;
+}
+
+[[nodiscard]] inline std::array<uint8_t, 32> sha256_raw(const uint8_t* data, size_t len) {
     BCRYPT_HASH_HANDLE hHash = detail::thread_sha256_handle();
     std::array<uint8_t, 32> out{};
     NTSTATUS st = 0;
-    size_t off = 0;
-    while (off < len) {
-        ULONG chunk = static_cast<ULONG>((std::min<size_t>)(len - off, 0x40000000ULL));
-        st = BCryptHashData(hHash, const_cast<PUCHAR>(data + off), chunk, 0);
-        if (st != 0) break;
-        off += chunk;
+    if (len > 0) {
+        if (!data) throw std::runtime_error("null SHA256 input");
+        size_t off = 0;
+        while (off < len) {
+            ULONG chunk = static_cast<ULONG>((std::min<size_t>)(len - off, 0x40000000ULL));
+            st = BCryptHashData(hHash, const_cast<PUCHAR>(data + off), chunk, 0);
+            if (st != 0) break;
+            off += chunk;
+        }
     }
     NTSTATUS fst = BCryptFinishHash(hHash, out.data(), 32, 0);
     if (st != 0 || fst != 0) throw std::runtime_error("BCryptHash SHA256 failed");
     return out;
 }
 
-inline std::string sha256_hex(const uint8_t* data, size_t len) {
+[[nodiscard]] inline std::string sha256_hex(const uint8_t* data, size_t len) {
     auto digest = sha256_raw(data, len);
     return hex_lower(digest.data(), 32);
 }
 
-inline std::string sha256_hex(std::string_view s) {
-    return sha256_hex(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+[[nodiscard]] inline std::string sha256_hex(std::string_view s) {
+    uint8_t dummy = 0;
+    const uint8_t* ptr = s.empty() ? &dummy : reinterpret_cast<const uint8_t*>(s.data());
+    return sha256_hex(ptr, s.size());
 }
 
 inline std::string sha256_file_hex_w(const wchar_t* path, uint64_t known_size = UINT64_MAX, bool* is_pe = nullptr) {
@@ -295,40 +467,67 @@ inline std::string sha256_file_hex_w(const wchar_t* path, uint64_t known_size = 
     return hex_lower(out.data(), 32);
 }
 
-inline std::array<uint8_t, 32> hmac_sha256_raw(const uint8_t* key, size_t key_len, const uint8_t* data, size_t len) {
-    BCRYPT_HASH_HANDLE hHash = nullptr;
+[[nodiscard]] inline std::array<uint8_t, 32> hmac_sha256_raw(
+    const uint8_t* key,
+    size_t key_len,
+    const uint8_t* data,
+    size_t len
+) {
+    if (key_len > (std::numeric_limits<ULONG>::max)()) {
+        throw std::runtime_error("HMAC key too large");
+    }
+    uint8_t dummy = 0;
+    const uint8_t* key_ptr = (key_len == 0) ? &dummy : key;
+    if (key_len > 0 && !key_ptr) throw std::runtime_error("null HMAC key");
+
+    detail::BCryptHashGuard hg;
     if (BCryptCreateHash(
-            detail::hmac_sha256_alg(), &hHash, nullptr, 0,
-            const_cast<PUCHAR>(key), static_cast<ULONG>(key_len), 0) != 0) {
+            detail::hmac_sha256_alg(), &hg.h, nullptr, 0,
+            const_cast<PUCHAR>(key_ptr), static_cast<ULONG>(key_len), 0) != 0) {
         throw std::runtime_error("BCryptCreateHash HMAC-SHA256 failed");
     }
     std::array<uint8_t, 32> out{};
     NTSTATUS st = 0;
-    size_t off = 0;
-    while (off < len) {
-        ULONG chunk = static_cast<ULONG>((std::min<size_t>)(len - off, 0x40000000ULL));
-        st = BCryptHashData(hHash, const_cast<PUCHAR>(data + off), chunk, 0);
-        if (st != 0) break;
-        off += chunk;
+    if (len == 0) {
+        st = BCryptHashData(hg.h, &dummy, 0, 0);
+    } else {
+        if (!data) throw std::runtime_error("null HMAC data");
+        size_t off = 0;
+        while (off < len) {
+            ULONG chunk = static_cast<ULONG>((std::min<size_t>)(len - off, 0x40000000ULL));
+            st = BCryptHashData(hg.h, const_cast<PUCHAR>(data + off), chunk, 0);
+            if (st != 0) break;
+            off += chunk;
+        }
     }
-    if (st == 0) st = BCryptFinishHash(hHash, out.data(), 32, 0);
-    BCryptDestroyHash(hHash);
+    if (st == 0) st = BCryptFinishHash(hg.h, out.data(), 32, 0);
     if (st != 0) throw std::runtime_error("BCryptHash HMAC-SHA256 failed");
     return out;
 }
 
-inline std::array<uint8_t, 32> pbkdf2_hmac_sha1_32(
+[[nodiscard]] inline std::array<uint8_t, 32> pbkdf2_hmac_sha1_32(
     std::string_view password,
     const uint8_t* salt,
     size_t salt_len,
     uint64_t iterations
 ) {
+    if (password.size() > (std::numeric_limits<ULONG>::max)() ||
+        salt_len > (std::numeric_limits<ULONG>::max)()) {
+        throw std::runtime_error("PBKDF2 input too large");
+    }
+    uint8_t dummy = 0;
+    PUCHAR pw_ptr = password.empty()
+        ? &dummy
+        : reinterpret_cast<PUCHAR>(const_cast<char*>(password.data()));
+    PUCHAR salt_ptr = (salt_len == 0) ? &dummy : const_cast<PUCHAR>(salt);
+    if (salt_len > 0 && !salt_ptr) throw std::runtime_error("null PBKDF2 salt");
+
     std::array<uint8_t, 32> out{};
     NTSTATUS st = BCryptDeriveKeyPBKDF2(
         detail::hmac_sha1_alg(),
-        reinterpret_cast<PUCHAR>(const_cast<char*>(password.data())),
+        pw_ptr,
         static_cast<ULONG>(password.size()),
-        const_cast<PUCHAR>(salt),
+        salt_ptr,
         static_cast<ULONG>(salt_len),
         iterations,
         out.data(),
@@ -338,29 +537,32 @@ inline std::array<uint8_t, 32> pbkdf2_hmac_sha1_32(
     return out;
 }
 
-inline std::vector<uint8_t> aes256_cbc_decrypt(
+[[nodiscard]] inline std::vector<uint8_t> aes256_cbc_decrypt(
     const uint8_t* key,
     size_t key_len,
     const uint8_t* iv,
     const uint8_t* ciphertext,
     size_t ciphertext_len
 ) {
-    if (key_len != 32 || ciphertext_len == 0 || (ciphertext_len % 16) != 0) {
+    if (!key || !iv || !ciphertext || key_len != 32 || ciphertext_len == 0 ||
+        (ciphertext_len % 16) != 0 || ciphertext_len > (std::numeric_limits<ULONG>::max)()) {
         throw std::runtime_error("invalid AES-256-CBC parameters");
     }
-    BCRYPT_KEY_HANDLE hKey = nullptr;
+    detail::BCryptKeyGuard kg;
     if (BCryptGenerateSymmetricKey(
-            detail::aes_cbc_alg(), &hKey, nullptr, 0,
+            detail::aes_cbc_alg(), &kg.h, nullptr, 0,
             const_cast<PUCHAR>(key), static_cast<ULONG>(key_len), 0) != 0) {
         throw std::runtime_error("BCryptGenerateSymmetricKey failed");
     }
 
     uint8_t iv_buf[16];
+    SecureZeroGuard iv_guard(iv_buf, sizeof(iv_buf));
     std::memcpy(iv_buf, iv, 16);
+
     std::vector<uint8_t> out(ciphertext_len);
     ULONG res_len = 0;
     NTSTATUS st = BCryptDecrypt(
-        hKey,
+        kg.h,
         const_cast<PUCHAR>(ciphertext),
         static_cast<ULONG>(ciphertext_len),
         nullptr,
@@ -370,24 +572,30 @@ inline std::vector<uint8_t> aes256_cbc_decrypt(
         static_cast<ULONG>(out.size()),
         &res_len,
         0);
-    SecureZeroMemory(iv_buf, sizeof(iv_buf));
-    BCryptDestroyKey(hKey);
-    if (st != 0) throw std::runtime_error("BCryptDecrypt failed");
+    if (st != 0) {
+        wipe_vector(out);
+        throw std::runtime_error("BCryptDecrypt failed");
+    }
 
+    if (res_len == 0 || res_len > out.size()) {
+        wipe_vector(out);
+        throw std::runtime_error("empty or invalid decrypted data");
+    }
     out.resize(res_len);
-    if (out.empty()) throw std::runtime_error("empty decrypted data");
     uint8_t pad = out.back();
     if (pad == 0 || pad > 16 || pad > out.size()) {
-        SecureZeroMemory(out.data(), out.size());
+        wipe_vector(out);
         throw std::runtime_error("invalid PKCS7 padding");
     }
     for (size_t i = out.size() - pad; i < out.size(); ++i) {
         if (out[i] != pad) {
-            SecureZeroMemory(out.data(), out.size());
+            wipe_vector(out);
             throw std::runtime_error("invalid PKCS7 padding bytes");
         }
     }
-    out.resize(out.size() - pad);
+    const size_t pt_len = out.size() - pad;
+    wipe_bytes(out.data() + pt_len, pad);
+    out.resize(pt_len);
     return out;
 }
 
@@ -445,7 +653,7 @@ inline std::vector<std::wstring> reg_enum_subkeys(HKEY root, const wchar_t* subk
     return nt::nt_reg_enum_subkeys(root, subkey);
 }
 
-inline std::pair<std::wstring, std::string> file_metadata_w(const wchar_t* path, bool known_pe = false) {
+[[nodiscard]] inline std::pair<std::wstring, std::string> file_metadata_w(const wchar_t* path, bool known_pe = false) {
     // Callers that already inspected the file while hashing can pass
     // known_pe=true to avoid a second open/read of the MZ header.
     if (!known_pe) {
@@ -471,24 +679,40 @@ inline std::pair<std::wstring, std::string> file_metadata_w(const wchar_t* path,
     UINT len = 0;
     std::string ver_str;
     if (VerQueryValueW(buf.data(), L"\\", &ptr, &len) && ptr && len >= sizeof(VS_FIXEDFILEINFO)) {
-        auto* info = static_cast<const VS_FIXEDFILEINFO*>(ptr);
+        VS_FIXEDFILEINFO info{};
+        std::memcpy(&info, ptr, sizeof(info));
+        const unsigned parts[4] = {
+            static_cast<unsigned>(info.dwFileVersionMS >> 16),
+            static_cast<unsigned>(info.dwFileVersionMS & 0xFFFF),
+            static_cast<unsigned>(info.dwFileVersionLS >> 16),
+            static_cast<unsigned>(info.dwFileVersionLS & 0xFFFF),
+        };
         char vbuf[64];
-        int n = std::snprintf(
-            vbuf, sizeof(vbuf), "%u.%u.%u.%u",
-            static_cast<unsigned>(info->dwFileVersionMS >> 16),
-            static_cast<unsigned>(info->dwFileVersionMS & 0xFFFF),
-            static_cast<unsigned>(info->dwFileVersionLS >> 16),
-            static_cast<unsigned>(info->dwFileVersionLS & 0xFFFF));
-        if (n > 0) ver_str.assign(vbuf, static_cast<size_t>(n));
+        char* cur = vbuf;
+        char* end = vbuf + sizeof(vbuf);
+        for (size_t idx = 0; idx < 4; ++idx) {
+            if (idx > 0 && cur < end) *cur++ = '.';
+            auto [p, ec] = std::to_chars(cur, end, parts[idx]);
+            if (ec != std::errc{}) break;
+            cur = p;
+        }
+        ver_str.assign(vbuf, static_cast<size_t>(cur - vbuf));
     }
 
     std::wstring orig;
     if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation", &ptr, &len) && ptr && len >= 4) {
-        auto* words = static_cast<const WORD*>(ptr);
-        wchar_t sub[64];
-        swprintf(sub, 64, L"\\StringFileInfo\\%04x%04x\\OriginalFilename", words[0], words[1]);
+        WORD words[2]{};
+        std::memcpy(words, ptr, sizeof(words));
+        constexpr wchar_t hex_w[] = L"0123456789abcdef";
+        wchar_t sub[64] = L"\\StringFileInfo\\00000000\\OriginalFilename";
+        // Write 8 hex digits starting at offset 16 ("\\StringFileInfo\\")
+        for (int s = 0; s < 4; ++s) {
+            sub[16 + s] = hex_w[(words[0] >> ((3 - s) * 4)) & 0xFu];
+            sub[20 + s] = hex_w[(words[1] >> ((3 - s) * 4)) & 0xFu];
+        }
         if (VerQueryValueW(buf.data(), sub, &ptr, &len) && ptr && len > 0) {
-            orig.assign(static_cast<const wchar_t*>(ptr));
+            const wchar_t* wptr = static_cast<const wchar_t*>(ptr);
+            orig.assign(wptr, wcsnlen(wptr, len));
         }
     }
     return {std::move(orig), std::move(ver_str)};
@@ -518,8 +742,9 @@ inline std::string signer_thumbprint_w(const wchar_t* path) {
     return result;
 }
 
-inline std::string base64_encode(const uint8_t* data, size_t len) {
+[[nodiscard]] inline std::string base64_encode(const uint8_t* data, size_t len) {
     if (len == 0) return {};
+    if (!data) throw std::runtime_error("null base64_encode input");
     if (len > (std::numeric_limits<DWORD>::max)()) {
         throw std::runtime_error("base64_encode input too large");
     }
@@ -541,9 +766,10 @@ inline std::string base64_encode(const uint8_t* data, size_t len) {
     return out;
 }
 
-inline std::vector<uint8_t> base64_decode(std::string_view input) {
+[[nodiscard]] inline std::vector<uint8_t> base64_decode(std::string_view input) {
     bool has_non_ws = false;
-    for (unsigned char c : input) {
+    for (char ch : input) {
+        const unsigned char c = static_cast<unsigned char>(ch);
         if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
             has_non_ws = true;
             break;
@@ -571,7 +797,7 @@ inline std::vector<uint8_t> base64_decode(std::string_view input) {
     return out;
 }
 
-inline std::string format_plist_date(std::string_view raw) {
+[[nodiscard]] inline std::string format_plist_date(std::string_view raw) {
     while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front()))) raw.remove_prefix(1);
     while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back()))) raw.remove_suffix(1);
     if (raw.size() < 19 || raw[4] != '-' || raw[7] != '-' ||
@@ -608,38 +834,65 @@ inline std::string format_plist_date(std::string_view raw) {
         }
     }
 
+    auto parse_exact_u = [](std::string_view sv, int64_t& val) -> bool {
+        if (sv.empty()) return false;
+        for (char ch : sv) {
+            if (ch < '0' || ch > '9') return false;
+        }
+        auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
+        return ec == std::errc{} && ptr == sv.data() + sv.size();
+    };
+
     bool has_tz = false;
     int64_t tz_off_sec = 0;
     if (pos < raw.size()) {
-        if (raw[pos] == 'Z' || raw[pos] == 'z') {
+        if ((raw[pos] == 'Z' || raw[pos] == 'z') && pos + 1 == raw.size()) {
             has_tz = true;
             tz_off_sec = 0;
         } else if (raw[pos] == '+' || raw[pos] == '-') {
             int64_t sign = (raw[pos] == '-') ? -1 : 1;
             std::string_view rest = raw.substr(pos + 1);
             int64_t hh = 0, mm = 0;
-            if (!rest.empty()) {
-                size_t colon = rest.find(':');
-                if (colon != std::string_view::npos) {
-                    std::from_chars(rest.data(), rest.data() + colon, hh);
-                    std::from_chars(rest.data() + colon + 1, rest.data() + rest.size(), mm);
-                } else if (rest.size() >= 4) {
-                    std::from_chars(rest.data(), rest.data() + 2, hh);
-                    std::from_chars(rest.data() + 2, rest.data() + 4, mm);
-                } else {
-                    std::from_chars(rest.data(), rest.data() + rest.size(), hh);
-                }
+            size_t colon = rest.find(':');
+            bool ok = false;
+            if (colon != std::string_view::npos) {
+                ok = parse_exact_u(rest.substr(0, colon), hh) &&
+                     parse_exact_u(rest.substr(colon + 1), mm);
+            } else if (rest.size() == 4) {
+                ok = parse_exact_u(rest.substr(0, 2), hh) &&
+                     parse_exact_u(rest.substr(2, 2), mm);
+            } else if (rest.size() == 1 || rest.size() == 2) {
+                ok = parse_exact_u(rest, hh);
+            }
+            if (!ok || hh < 0 || hh > 23 || mm < 0 || mm > 59) {
+                return std::string(raw);
             }
             has_tz = true;
             tz_off_sec = sign * (hh * 3600 + mm * 60);
+        } else {
+            return std::string(raw);
         }
     }
 
-    char buf[64];
+    auto append_u_pad = [](std::string& dst, uint64_t v, size_t width) {
+        char tmp[32];
+        auto [p, ec] = std::to_chars(tmp, tmp + sizeof(tmp), v);
+        size_t n = static_cast<size_t>(p - tmp);
+        if (n < width) dst.append(width - n, '0');
+        dst.append(tmp, n);
+    };
+
     if (!has_tz) {
-        std::snprintf(buf, sizeof(buf), "%04u-%02u-%02uT%02u:%02u:%02u.%06u",
-                      year, month, day, hour, minute, sec, usec);
-        return buf;
+        std::string out;
+        out.reserve(32);
+        append_u_pad(out, year, 4); out.push_back('-');
+        append_u_pad(out, month, 2); out.push_back('-');
+        append_u_pad(out, day, 2); out.push_back('T');
+        append_u_pad(out, hour, 2); out.push_back(':');
+        append_u_pad(out, minute, 2); out.push_back(':');
+        append_u_pad(out, sec, 2); out.push_back('.');
+        append_u_pad(out, usec, 6);
+        return out;
     }
 
     SYSTEMTIME st{};
@@ -652,7 +905,12 @@ inline std::string format_plist_date(std::string_view raw) {
     FILETIME ft{};
     if (!SystemTimeToFileTime(&st, &ft)) return std::string(raw);
     uint64_t ft_u64 = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-    uint64_t utc_u64 = static_cast<uint64_t>(static_cast<int64_t>(ft_u64) - tz_off_sec * 10000000LL);
+    int64_t tz_ticks = tz_off_sec * 10000000LL;
+    if (ft_u64 > static_cast<uint64_t>((std::numeric_limits<int64_t>::max)()) ||
+        (tz_ticks > 0 && static_cast<uint64_t>(tz_ticks) > ft_u64)) {
+        return std::string(raw);
+    }
+    uint64_t utc_u64 = static_cast<uint64_t>(static_cast<int64_t>(ft_u64) - tz_ticks);
     FILETIME utc_ft{};
     utc_ft.dwLowDateTime = static_cast<DWORD>(utc_u64 & 0xFFFFFFFFULL);
     utc_ft.dwHighDateTime = static_cast<DWORD>(utc_u64 >> 32);
@@ -668,14 +926,23 @@ inline std::string format_plist_date(std::string_view raw) {
     int64_t local_off_sec = (static_cast<int64_t>(local_u64) - static_cast<int64_t>(utc_u64)) / 10000000LL;
     char sign = (local_off_sec < 0) ? '-' : '+';
     int64_t abs_min = (local_off_sec < 0 ? -local_off_sec : local_off_sec) / 60;
-    int64_t off_h = abs_min / 60;
-    int64_t off_m = abs_min % 60;
-    const char* z_suffix = (local_off_sec == 0) ? "Z" : "";
-    std::snprintf(buf, sizeof(buf), "%04u-%02u-%02uT%02u:%02u:%02u.%06u%c%02lld:%02lld%s",
-                  local_st.wYear, local_st.wMonth, local_st.wDay,
-                  local_st.wHour, local_st.wMinute, local_st.wSecond,
-                  usec, sign, static_cast<long long>(off_h), static_cast<long long>(off_m), z_suffix);
-    return buf;
+    uint64_t off_h = static_cast<uint64_t>(abs_min / 60);
+    uint64_t off_m = static_cast<uint64_t>(abs_min % 60);
+
+    std::string out;
+    out.reserve(40);
+    append_u_pad(out, local_st.wYear, 4); out.push_back('-');
+    append_u_pad(out, local_st.wMonth, 2); out.push_back('-');
+    append_u_pad(out, local_st.wDay, 2); out.push_back('T');
+    append_u_pad(out, local_st.wHour, 2); out.push_back(':');
+    append_u_pad(out, local_st.wMinute, 2); out.push_back(':');
+    append_u_pad(out, local_st.wSecond, 2); out.push_back('.');
+    append_u_pad(out, usec, 6);
+    out.push_back(sign);
+    append_u_pad(out, off_h, 2); out.push_back(':');
+    append_u_pad(out, off_m, 2);
+    if (local_off_sec == 0) out.push_back('Z');
+    return out;
 }
 
 } // namespace seb::win

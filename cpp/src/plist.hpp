@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <stdexcept>
@@ -37,7 +38,7 @@ struct PlistValue {
     std::variant<PlistDict, PlistArray, PlistStr, int64_t, double, bool, PlistData, PlistDate> data;
 };
 
-inline bool iequals(std::string_view a, std::string_view b) {
+[[nodiscard]] inline bool iequals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
         if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
@@ -47,7 +48,7 @@ inline bool iequals(std::string_view a, std::string_view b) {
     return true;
 }
 
-inline std::string unescape_xml(std::string_view s) {
+[[nodiscard]] inline std::string unescape_xml(std::string_view s) {
     if (s.find('&') == std::string_view::npos) return std::string(s);
     std::string out;
     out.reserve(s.size());
@@ -63,10 +64,23 @@ inline std::string unescape_xml(std::string_view s) {
                 if (ent == "quot") { out.push_back('"'); i = semi; continue; }
                 if (!ent.empty() && ent[0] == '#') {
                     uint32_t cp = 0;
-                    if (ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X')) {
-                        std::from_chars(ent.data() + 2, ent.data() + ent.size(), cp, 16);
+                    const char* start_p = nullptr;
+                    const char* end_p = ent.data() + ent.size();
+                    int base = 10;
+                    if (ent.size() > 2 && (ent[1] == 'x' || ent[1] == 'X')) {
+                        start_p = ent.data() + 2;
+                        base = 16;
+                    } else if (ent.size() > 1) {
+                        start_p = ent.data() + 1;
                     } else {
-                        std::from_chars(ent.data() + 1, ent.data() + ent.size(), cp, 10);
+                        throw std::runtime_error("empty xml numeric entity");
+                    }
+                    auto [ptr, ec] = std::from_chars(start_p, end_p, cp, base);
+                    if (ec != std::errc{} || ptr != end_p) {
+                        throw std::runtime_error("invalid xml numeric entity");
+                    }
+                    if (cp == 0 || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) {
+                        throw std::runtime_error("invalid xml unicode scalar value");
                     }
                     if (cp < 0x80) {
                         out.push_back(static_cast<char>(cp));
@@ -104,7 +118,7 @@ struct XmlParser {
     }
 
     inline bool starts_with(std::string_view pat) const {
-        return src.size() - pos >= pat.size() && src.compare(pos, pat.size(), pat) == 0;
+        return src.substr(pos).starts_with(pat);
     }
 
     void skip_prolog() {
@@ -112,15 +126,33 @@ struct XmlParser {
             skip_ws();
             if (pos >= src.size()) break;
             if (starts_with("<?")) {
-                size_t end = src.find("?>", pos);
+                size_t end = src.find("?>", pos + 2);
                 if (end == std::string_view::npos) throw std::runtime_error("unterminated <?");
                 pos = end + 2;
             } else if (starts_with("<!DOCTYPE")) {
-                size_t end = src.find('>', pos);
-                if (end == std::string_view::npos) throw std::runtime_error("unterminated DOCTYPE");
-                pos = end + 1;
+                size_t p = pos + 9;
+                size_t bracket_depth = 0;
+                char quote = 0;
+                bool closed = false;
+                while (p < src.size()) {
+                    char ch = src[p++];
+                    if (quote != 0) {
+                        if (ch == quote) quote = 0;
+                    } else if (ch == '"' || ch == '\'') {
+                        quote = ch;
+                    } else if (ch == '[') {
+                        bracket_depth++;
+                    } else if (ch == ']' && bracket_depth > 0) {
+                        bracket_depth--;
+                    } else if (ch == '>' && bracket_depth == 0) {
+                        pos = p;
+                        closed = true;
+                        break;
+                    }
+                }
+                if (!closed) throw std::runtime_error("unterminated DOCTYPE");
             } else if (starts_with("<!--")) {
-                size_t end = src.find("-->", pos);
+                size_t end = src.find("-->", pos + 4);
                 if (end == std::string_view::npos) throw std::runtime_error("unterminated comment");
                 pos = end + 3;
             } else {
@@ -144,7 +176,19 @@ struct XmlParser {
             is_close = true;
             pos++;
         }
-        size_t end = src.find('>', pos);
+        size_t end = std::string_view::npos;
+        char quote = 0;
+        for (size_t p = pos; p < src.size(); ++p) {
+            char ch = src[p];
+            if (quote != 0) {
+                if (ch == quote) quote = 0;
+            } else if (ch == '"' || ch == '\'') {
+                quote = ch;
+            } else if (ch == '>') {
+                end = p;
+                break;
+            }
+        }
         if (end == std::string_view::npos) throw std::runtime_error("unterminated tag");
         std::string_view raw = src.substr(pos, end - pos);
         pos = end + 1;
@@ -162,18 +206,40 @@ struct XmlParser {
         return {name, is_close, self_close};
     }
 
-    std::optional<std::string_view> read_raw_until_close(std::string_view expected) {
-        size_t start = pos;
-        size_t lt = src.find('<', pos);
-        if (lt == std::string_view::npos) throw std::runtime_error("expected closing tag");
-        std::string_view raw = src.substr(start, lt - start);
-        pos = lt;
-        Tag t = read_tag();
-        if (!t.is_close || t.name != expected) {
-            throw std::runtime_error("expected </" + std::string(expected) + ">");
+    std::optional<std::string> read_text_until_close(std::string_view expected) {
+        std::string out;
+        bool has_any = false;
+        while (true) {
+            size_t lt = src.find('<', pos);
+            if (lt == std::string_view::npos) throw std::runtime_error("expected closing tag");
+            if (lt > pos) {
+                out.append(unescape_xml(src.substr(pos, lt - pos)));
+                has_any = true;
+            }
+            std::string_view rem = src.substr(lt);
+            if (rem.starts_with("<!--")) {
+                size_t cend = src.find("-->", lt + 4);
+                if (cend == std::string_view::npos) throw std::runtime_error("unterminated comment");
+                pos = cend + 3;
+                continue;
+            }
+            if (rem.starts_with("<![CDATA[")) {
+                size_t cend = src.find("]]>", lt + 9);
+                if (cend == std::string_view::npos) throw std::runtime_error("unterminated CDATA");
+                out.append(src.substr(lt + 9, cend - (lt + 9)));
+                has_any = true;
+                pos = cend + 3;
+                continue;
+            }
+            pos = lt;
+            Tag t = read_tag();
+            if (!t.is_close || t.name != expected) {
+                throw std::runtime_error("expected </" + std::string(expected) + ">");
+            }
+            break;
         }
-        if (raw.empty()) return std::nullopt;
-        return raw;
+        if (!has_any) return std::nullopt;
+        return out;
     }
 
     PlistValue parse_value() {
@@ -181,52 +247,63 @@ struct XmlParser {
         Tag t = read_tag();
         if (t.is_close) throw std::runtime_error("unexpected closing tag </" + std::string(t.name) + ">");
         if (t.name == "true") {
-            if (!t.self_close) read_raw_until_close("true");
+            if (!t.self_close) read_text_until_close("true");
             return PlistValue{true};
         }
         if (t.name == "false") {
-            if (!t.self_close) read_raw_until_close("false");
+            if (!t.self_close) read_text_until_close("false");
             return PlistValue{false};
         }
         if (t.name == "string") {
             if (t.self_close) return PlistValue{PlistStr{std::nullopt}};
-            auto raw = read_raw_until_close("string");
-            if (!raw) return PlistValue{PlistStr{std::nullopt}};
-            return PlistValue{PlistStr{unescape_xml(*raw)}};
+            auto txt = read_text_until_close("string");
+            if (!txt) return PlistValue{PlistStr{std::nullopt}};
+            return PlistValue{PlistStr{std::move(*txt)}};
         }
         if (t.name == "integer") {
-            auto raw = t.self_close ? std::nullopt : read_raw_until_close("integer");
+            auto txt = t.self_close ? std::nullopt : read_text_until_close("integer");
             int64_t val = 0;
-            if (raw && !raw->empty()) {
-                std::string_view sv = *raw;
-                auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val);
-                if (ec != std::errc{}) val = std::stoll(std::string(sv));
+            if (txt) {
+                std::string_view sv = *txt;
+                while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) sv.remove_prefix(1);
+                while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back()))) sv.remove_suffix(1);
+                if (!sv.empty()) {
+                    const char* start_p = sv.data();
+                    if (sv.front() == '+') sv.remove_prefix(1);
+                    start_p = sv.data();
+                    auto [ptr, ec] = std::from_chars(start_p, start_p + sv.size(), val);
+                    if (ec != std::errc{} || ptr != start_p + sv.size()) {
+                        throw std::runtime_error("invalid plist integer");
+                    }
+                }
             }
             return PlistValue{val};
         }
         if (t.name == "real") {
-            auto raw = t.self_close ? std::nullopt : read_raw_until_close("real");
+            auto txt = t.self_close ? std::nullopt : read_text_until_close("real");
             double val = 0.0;
-            if (raw && !raw->empty()) {
-                std::string_view sv = *raw;
-                if (sv.size() < 64) {
-                    char buf[64];
-                    std::memcpy(buf, sv.data(), sv.size());
-                    buf[sv.size()] = '\0';
-                    val = std::strtod(buf, nullptr);
-                } else {
-                    val = std::stod(std::string(sv));
+            if (txt) {
+                std::string_view sv = *txt;
+                while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) sv.remove_prefix(1);
+                while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back()))) sv.remove_suffix(1);
+                if (!sv.empty()) {
+                    std::string tmp(sv);
+                    char* endp = nullptr;
+                    val = std::strtod(tmp.c_str(), &endp);
+                    if (endp != tmp.c_str() + tmp.size()) {
+                        throw std::runtime_error("invalid plist real");
+                    }
                 }
             }
             return PlistValue{val};
         }
         if (t.name == "data") {
-            auto raw = t.self_close ? std::nullopt : read_raw_until_close("data");
-            return PlistValue{PlistData{raw ? win::base64_decode(*raw) : std::vector<uint8_t>{}}};
+            auto txt = t.self_close ? std::nullopt : read_text_until_close("data");
+            return PlistValue{PlistData{txt ? win::base64_decode(*txt) : std::vector<uint8_t>{}}};
         }
         if (t.name == "date") {
-            auto raw = t.self_close ? std::nullopt : read_raw_until_close("date");
-            return PlistValue{PlistDate{win::format_plist_date(raw.value_or(""))}};
+            auto txt = t.self_close ? std::nullopt : read_text_until_close("date");
+            return PlistValue{PlistDate{win::format_plist_date(txt ? std::string_view(*txt) : std::string_view{})}};
         }
         if (t.name == "dict") {
             if (t.self_close) return PlistValue{PlistDict{}};
@@ -243,12 +320,22 @@ struct XmlParser {
                 if (kt.is_close || kt.name != "key") throw std::runtime_error("expected <key>");
                 std::string key;
                 if (!kt.self_close) {
-                    if (auto raw = read_raw_until_close("key")) {
-                        key = unescape_xml(*raw);
+                    if (auto txt = read_text_until_close("key")) {
+                        key = std::move(*txt);
                     }
                 }
                 PlistValue val = parse_value();
-                entries.emplace_back(std::move(key), std::move(val));
+                bool replaced = false;
+                for (auto& kv : entries) {
+                    if (kv.first == key) {
+                        kv.second = std::move(val);
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    entries.emplace_back(std::move(key), std::move(val));
+                }
             }
             return PlistValue{std::move(entries)};
         }
@@ -271,13 +358,18 @@ struct XmlParser {
     }
 };
 
-inline PlistDict load_settings_xml_bytes(const std::vector<uint8_t>& data) {
+[[nodiscard]] inline PlistDict load_settings_xml_bytes(const std::vector<uint8_t>& data) {
     size_t offset = (data.size() >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) ? 3 : 0;
     std::string_view xml(reinterpret_cast<const char*>(data.data() + offset), data.size() - offset);
     XmlParser p{xml, 0};
     auto t = p.read_tag();
-    if (t.name != "plist") throw std::runtime_error("expected <plist>");
+    if (t.is_close || t.name != "plist") throw std::runtime_error("expected <plist>");
+    if (t.self_close) throw std::runtime_error("empty <plist/>");
     PlistValue root = p.parse_value();
+    auto ct = p.read_tag();
+    if (!ct.is_close || ct.name != "plist") throw std::runtime_error("expected </plist>");
+    p.skip_prolog();
+    if (p.pos != p.src.size()) throw std::runtime_error("trailing data after </plist>");
     auto* d = std::get_if<PlistDict>(&root.data);
     if (!d) throw std::runtime_error("expected root dictionary");
     return std::move(*d);
@@ -364,7 +456,7 @@ inline void serialize_value(const PlistValue& v, std::string& out) {
     }
 }
 
-inline std::string exam_configuration_key(const PlistDict& settings, std::string_view purpose) {
+[[nodiscard]] inline std::string exam_configuration_key(const PlistDict& settings, std::string_view purpose) {
     PlistDict effective = settings;
     if (purpose != "as-is") {
         int64_t pval = (purpose == "starting-exam") ? 0 : 1;
@@ -386,7 +478,7 @@ inline std::string exam_configuration_key(const PlistDict& settings, std::string
     return win::sha256_hex(serialized);
 }
 
-inline const PlistValue* find_key(const PlistDict& dict, std::string_view key) {
+[[nodiscard]] inline const PlistValue* find_key(const PlistDict& dict, std::string_view key) {
     for (const auto& [k, v] : dict) {
         if (k == key) return &v;
     }
