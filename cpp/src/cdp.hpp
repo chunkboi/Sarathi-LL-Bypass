@@ -46,6 +46,51 @@ const _origFetch = window.fetch;
   }
   return Reflect.apply(_origFetch, this, arguments);
 };
+  // 0. FORWARD BROWSER CONSOLE TO CMD (without CDP Runtime.enable)
+  (function forwardConsole() {
+    const formatArgs = (args) => {
+      const parts = [];
+      let skipStyles = 0;
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (i === 0 && typeof a === 'string' && a.includes('%c')) {
+          const matches = a.match(/%c/g);
+          skipStyles = matches ? matches.length : 0;
+          parts.push(a.replace(/%c/g, ''));
+          continue;
+        }
+        if (skipStyles > 0) {
+          skipStyles--;
+          continue;
+        }
+        if (a === null) parts.push('null');
+        else if (a === undefined) parts.push('undefined');
+        else if (typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean') parts.push(String(a));
+        else if (a instanceof Error) parts.push(`${a.name || 'Error'}: ${a.message || ''}`);
+        else {
+          try { parts.push(JSON.stringify(a)); } catch { parts.push('[object]'); }
+        }
+      }
+      return parts.join(' ').trim();
+    };
+    const sendLog = (level, text) => {
+      if (!text || typeof location !== 'object' || !/^https?:/i.test(location.origin || '')) return;
+      try {
+        Reflect.apply(_origFetch, window, [
+          location.origin + '/__seb_console',
+          { method: 'POST', body: JSON.stringify({ level, text }), keepalive: true }
+        ]).catch(() => {});
+      } catch {}
+    };
+    for (const lvl of ['log', 'info', 'warn', 'error', 'debug']) {
+      const orig = console[lvl];
+      if (typeof orig !== 'function') continue;
+      console[lvl] = stealth(function () {
+        sendLog(lvl, formatArgs(arguments));
+        return Reflect.apply(orig, this, arguments);
+      }, lvl);
+    }
+  })();
   // 1. FAKE SEB ENVIRONMENT
   window.SafeExamBrowser = {
     version: "3.10.0",
@@ -1441,6 +1486,25 @@ PROCESS_INFORMATION pi{};
         if (!req) continue;
         std::string req_method = (req->get("method") && req->get("method")->as_str()) ? *req->get("method")->as_str() : "GET";
         std::string req_url = (req->get("url") && req->get("url")->as_str()) ? *req->get("url")->as_str() : "";
+
+        if (plist::iequals(req_method, "POST") && req_url.ends_with("/__seb_console")) {
+            if (const auto* pd = req->get("postData"); pd && pd->as_str()) {
+                try {
+                    auto payload = json::parse(*pd->as_str());
+                    const auto* lvl_v = payload.get("level");
+                    const auto* txt_v = payload.get("text");
+                    std::string lvl = (lvl_v && lvl_v->as_str()) ? *lvl_v->as_str() : "log";
+                    if (txt_v && txt_v->as_str() && !txt_v->as_str()->empty()) {
+                        std::cerr << "[browser:" << lvl << "] " << *txt_v->as_str() << "\n" << std::flush;
+                    }
+                } catch (...) {}
+            }
+            json::JsonObj fp;
+            fp.emplace_back("requestId", request_id);
+            fp.emplace_back("responseCode", int64_t(204));
+            send_cdp("Fetch.fulfillRequest", json::JsonVal(std::move(fp)), session_id);
+            continue;
+        }
 
         if (plist::iequals(req_method, "OPTIONS")) {
             if (verbose) vlog("OPTIONS 204 " + req_url);
