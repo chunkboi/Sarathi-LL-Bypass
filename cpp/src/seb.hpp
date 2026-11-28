@@ -18,7 +18,24 @@
 #include <utility>
 #include <vector>
 
+#ifndef FIND_FIRST_EX_LARGE_FETCH
+#define FIND_FIRST_EX_LARGE_FETCH 0x00000002
+#endif
+
 namespace seb {
+
+struct FindHandle {
+    HANDLE h = INVALID_HANDLE_VALUE;
+    FindHandle() = default;
+    explicit FindHandle(HANDLE handle) noexcept : h(handle) {}
+    ~FindHandle() {
+        if (h != INVALID_HANDLE_VALUE) FindClose(h);
+    }
+    FindHandle(const FindHandle&) = delete;
+    FindHandle& operator=(const FindHandle&) = delete;
+    explicit operator bool() const noexcept { return h != INVALID_HANDLE_VALUE; }
+    HANDLE get() const noexcept { return h; }
+};
 
 inline bool is_dir_w(const wchar_t* path) {
     return nt::nt_is_dir_w(path);
@@ -184,53 +201,28 @@ inline std::wstring detect_seb_root() {
 ) {
     std::vector<std::wstring> queue;
     queue.push_back(root_dir);
-    std::vector<uint8_t> buf(65536);
-    constexpr size_t hdr_sz = offsetof(nt::FILE_DIRECTORY_INFORMATION, FileName);
 
     for (size_t qi = 0; qi < queue.size(); ++qi) {
-        const std::wstring& dir = queue[qi];
-        nt::NtHandle dh(nt::nt_open_dir(dir.c_str()));
-        if (!dh) continue;
+        // Copy: queue.push_back() below may reallocate and invalidate a
+        // reference to queue[qi] while this directory is being scanned.
+        std::wstring dir = queue[qi];
+        std::wstring pattern = join_path_w(dir, L"*");
+        WIN32_FIND_DATAW ffd{};
+        FindHandle fh(FindFirstFileExW(
+            pattern.c_str(), FindExInfoBasic, &ffd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH));
+        if (!fh) continue;
 
-        BOOLEAN restart = TRUE;
-        while (true) {
-            nt::IO_STATUS_BLOCK iosb{};
-            NTSTATUS st = nt::NtQueryDirectoryFile(
-                dh.get(), nullptr, nullptr, nullptr, &iosb, buf.data(), static_cast<ULONG>(buf.size()),
-                nt::FileDirectoryInformationClass, FALSE, nullptr, restart);
-            restart = FALSE;
-            if (st != 0 && st != nt::STATUS_BUFFER_OVERFLOW) break;
-            if (iosb.Information == 0 || iosb.Information > buf.size()) break;
-
-            size_t off = 0;
-            size_t processed = 0;
-            while (off + hdr_sz <= iosb.Information) {
-                ++processed;
-                nt::FILE_DIRECTORY_INFORMATION info{};
-                std::memcpy(&info, buf.data() + off, hdr_sz);
-                if (info.FileNameLength <= iosb.Information - off - hdr_sz &&
-                    (info.FileNameLength % sizeof(wchar_t)) == 0) {
-                    std::wstring name_str(info.FileNameLength / sizeof(wchar_t), L'\0');
-                    if (!name_str.empty()) {
-                        std::memcpy(name_str.data(), buf.data() + off + hdr_sz, info.FileNameLength);
-                    }
-                    std::wstring_view name(name_str);
-                    if (!(name == L"." || name == L"..")) {
-                        if (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                            if (!(info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-                                queue.push_back(join_path_w(dir, name));
-                            }
-                        } else if (iequals_w(name, target)) {
-                            return join_path_w(dir, name);
-                        }
-                    }
+        do {
+            std::wstring_view name(ffd.cFileName);
+            if (name == L"." || name == L"..") continue;
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    queue.push_back(join_path_w(dir, name));
                 }
-                if (info.NextEntryOffset == 0) break;
-                if (info.NextEntryOffset < hdr_sz || info.NextEntryOffset > iosb.Information - off) break;
-                off += info.NextEntryOffset;
+            } else if (iequals_w(name, target)) {
+                return join_path_w(dir, name);
             }
-            if (st == nt::STATUS_BUFFER_OVERFLOW && processed == 0) break;
-        }
+        } while (FindNextFileW(fh.get(), &ffd));
     }
     return std::nullopt;
 }
@@ -402,6 +394,7 @@ inline std::string extract_salt_const(const std::wstring& root) {
 }
 
 inline void append_wide_truncated_w(std::vector<uint8_t>& dst, std::wstring_view w) {
+    if (w.empty()) return;
     const uint8_t* raw = reinterpret_cast<const uint8_t*>(w.data());
     dst.insert(dst.end(), raw, raw + w.size());
 }
@@ -436,9 +429,8 @@ inline void append_ascii_to_wide(std::wstring& dst, std::string_view ascii) {
     events.reserve(512);
     file_items.reserve(512);
 
-    // Iterative post-subdir DFS using a single heap-allocated 64 KiB directory
-    // buffer, preserving the exact traversal order of the recursive algorithm
-    // without risking stack overflow on deep directory trees.
+    // Iterative post-subdir DFS preserving the exact traversal order of the
+    // recursive algorithm without risking stack overflow on deep directory trees.
     struct ScanFrame {
         bool emit_files = false;
         std::wstring dir;
@@ -447,8 +439,6 @@ inline void append_ascii_to_wide(std::wstring& dst, std::string_view ascii) {
     };
     std::vector<ScanFrame> stack;
     stack.push_back({false, root, std::wstring(filename_w(root)), {}});
-    std::vector<uint8_t> dir_buf(65536);
-    constexpr size_t hdr_sz = offsetof(nt::FILE_DIRECTORY_INFORMATION, FileName);
 
     while (!stack.empty()) {
         ScanFrame frame = std::move(stack.back());
@@ -463,51 +453,26 @@ inline void append_ascii_to_wide(std::wstring& dst, std::string_view ascii) {
         }
 
         events.push_back({true, std::move(frame.dir_name), 0});
-        nt::NtHandle dh(nt::nt_open_dir(frame.dir.c_str()));
-        if (!dh) continue;
+        std::wstring pattern = join_path_w(frame.dir, L"*");
+        WIN32_FIND_DATAW ffd{};
+        FindHandle fh(FindFirstFileExW(
+            pattern.c_str(), FindExInfoBasic, &ffd, FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH));
+        if (!fh) continue;
 
         std::vector<std::pair<std::wstring, std::wstring>> subdirs;
         std::vector<FileItem> files;
-        BOOLEAN restart = TRUE;
-
-        while (true) {
-            nt::IO_STATUS_BLOCK iosb{};
-            NTSTATUS st = nt::NtQueryDirectoryFile(
-                dh.get(), nullptr, nullptr, nullptr, &iosb,
-                dir_buf.data(), static_cast<ULONG>(dir_buf.size()),
-                nt::FileDirectoryInformationClass, FALSE, nullptr, restart);
-            restart = FALSE;
-            if (st != 0 && st != nt::STATUS_BUFFER_OVERFLOW) break;
-            if (iosb.Information == 0 || iosb.Information > dir_buf.size()) break;
-
-            size_t off = 0;
-            size_t processed = 0;
-            while (off + hdr_sz <= iosb.Information) {
-                ++processed;
-                nt::FILE_DIRECTORY_INFORMATION info{};
-                std::memcpy(&info, dir_buf.data() + off, hdr_sz);
-                if (info.FileNameLength <= iosb.Information - off - hdr_sz &&
-                    (info.FileNameLength % sizeof(wchar_t)) == 0) {
-                    std::wstring name_str(info.FileNameLength / sizeof(wchar_t), L'\0');
-                    if (!name_str.empty()) {
-                        std::memcpy(name_str.data(), dir_buf.data() + off + hdr_sz, info.FileNameLength);
-                    }
-                    std::wstring_view name(name_str);
-                    if (!(name == L"." || name == L"..") && !(info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-                        if (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                            subdirs.emplace_back(join_path_w(frame.dir, name), std::move(name_str));
-                        } else {
-                            uint64_t sz = static_cast<uint64_t>(info.EndOfFile.QuadPart);
-                            files.push_back({join_path_w(frame.dir, name), std::move(name_str), sz});
-                        }
-                    }
-                }
-                if (info.NextEntryOffset == 0) break;
-                if (info.NextEntryOffset < hdr_sz || info.NextEntryOffset > iosb.Information - off) break;
-                off += info.NextEntryOffset;
+        do {
+            std::wstring_view name(ffd.cFileName);
+            if (name == L"." || name == L".." || (ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                continue;
             }
-            if (st == nt::STATUS_BUFFER_OVERFLOW && processed == 0) break;
-        }
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                subdirs.emplace_back(join_path_w(frame.dir, name), std::wstring(name));
+            } else {
+                uint64_t sz = (static_cast<uint64_t>(ffd.nFileSizeHigh) << 32) | ffd.nFileSizeLow;
+                files.push_back({join_path_w(frame.dir, name), std::wstring(name), sz});
+            }
+        } while (FindNextFileW(fh.get(), &ffd));
 
         if (!files.empty()) {
             stack.push_back({true, {}, {}, std::move(files)});
@@ -607,6 +572,9 @@ inline void append_ascii_to_wide(std::wstring& dst, std::string_view ascii) {
             if (!slot.error.empty()) throw std::runtime_error(slot.error);
         } else {
             if (!nt::nt_wait_all(raw_handles.data(), static_cast<ULONG>(raw_handles.size()))) {
+                for (HANDLE h : raw_handles) {
+                    (void)WaitForSingleObject(h, INFINITE);
+                }
                 throw std::runtime_error("nt_wait_all failed waiting for tree workers");
             }
             for (const auto& s : slots) {
@@ -784,7 +752,7 @@ inline void append_ascii_to_wide(std::wstring& dst, std::string_view ascii) {
     const auto* v = plist::find_key(settings, "examKeySalt");
     if (!v) throw std::runtime_error("examKeySalt missing");
     if (auto* bd = std::get_if<plist::PlistData>(&v->data)) {
-        return win::hex_lower(bd->bytes);
+        if (!bd->bytes.empty()) return win::hex_lower(bd->bytes);
     }
     if (auto* s = std::get_if<plist::PlistStr>(&v->data)) {
         if (s->text && !s->text->empty()) return *s->text;

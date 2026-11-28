@@ -1,11 +1,11 @@
 #pragma once
 
+#include "num_parse.hpp"
+
 #include <cctype>
-#include <cerrno>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -365,14 +365,7 @@ struct Parser {
                     }
                 }
             }
-            std::string num_str(tok);
-            errno = 0;
-            char* endp = nullptr;
-            double dval = std::strtod(num_str.c_str(), &endp);
-            if (endp != num_str.c_str() + num_str.size() || !std::isfinite(dval)) {
-                throw std::runtime_error("invalid or out-of-range json number");
-            }
-            return JsonVal(dval);
+            return JsonVal(num::parse_double_strict(tok));
         }
         throw std::runtime_error("unexpected char in json");
     }

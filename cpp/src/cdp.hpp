@@ -1023,6 +1023,38 @@ struct ProcThreadAttrGuard {
     ProcThreadAttrGuard(const ProcThreadAttrGuard&) = delete;
     ProcThreadAttrGuard& operator=(const ProcThreadAttrGuard&) = delete;
 };
+inline std::string format_hex_u32(DWORD v) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    char buf[11] = "0x00000000";
+    for (int i = 0; i < 8; ++i) {
+        buf[2 + i] = kHex[(v >> ((7 - i) * 4)) & 0xF];
+    }
+    return std::string(buf, 10);
+}
+
+inline void lockdown_after_browser_launch(bool verbose) {
+    auto vlog = [&](std::string_view msg) {
+        if (verbose) std::cerr << "[mitigation] " << msg << "\n";
+    };
+
+    PROCESS_MITIGATION_CHILD_PROCESS_POLICY cpp{};
+    cpp.NoChildProcessCreation = 1;
+    if (!SetProcessMitigationPolicy(ProcessChildProcessPolicy, &cpp, sizeof(cpp))) {
+        const DWORD err = GetLastError();
+        if (err != ERROR_NOT_SUPPORTED && err != ERROR_INVALID_PARAMETER) {
+            vlog("post-launch ProcessChildProcessPolicy failed (err=" + std::to_string(err) + ")");
+        }
+    }
+
+    PROCESS_MITIGATION_SYSTEM_CALL_DISABLE_POLICY scdp{};
+    scdp.DisallowWin32kSystemCalls = 1;
+    if (!SetProcessMitigationPolicy(ProcessSystemCallDisablePolicy, &scdp, sizeof(scdp))) {
+        const DWORD err = GetLastError();
+        if (err != ERROR_NOT_SUPPORTED && err != ERROR_INVALID_PARAMETER) {
+            vlog("post-launch ProcessSystemCallDisablePolicy failed (err=" + std::to_string(err) + ")");
+        }
+    }
+}
 
 inline void launch_cdp_browser(
     const std::string& start_url,
@@ -1108,24 +1140,52 @@ inline void launch_cdp_browser(
             &child_mitigations, sizeof(child_mitigations), nullptr, nullptr);
     if (has_attrs) sie.lpAttributeList = attr_guard.list;
 
-    PROCESS_INFORMATION pi{};
+PROCESS_INFORMATION pi{};
     DWORD create_flags = CREATE_SUSPENDED | (has_attrs ? EXTENDED_STARTUPINFO_PRESENT : 0);
     BOOL launched = CreateProcessW(
         chrome.c_str(), cmdline.data(), nullptr, nullptr, FALSE, create_flags,
         nullptr, nullptr, &sie.StartupInfo, &pi);
     if (!launched) {
-        throw std::runtime_error("failed to launch browser");
+        const DWORD err = GetLastError();
+        throw std::runtime_error(
+            "failed to launch browser (CreateProcessW err=" + std::to_string(err) +
+            " / " + format_hex_u32(err) + ")");
     }
     nt::NtHandle proc_h(pi.hProcess);
     nt::NtHandle thread_h(pi.hThread);
     job.assign(proc_h.get(), verbose);
-    ResumeThread(thread_h.get());
+    if (ResumeThread(thread_h.get()) == static_cast<DWORD>(-1)) {
+        const DWORD err = GetLastError();
+        TerminateProcess(proc_h.get(), 1);
+        throw std::runtime_error(
+            "failed to resume browser main thread (ResumeThread err=" + std::to_string(err) + ")");
+    }
     vlog("launched browser pid=" + std::to_string(pi.dwProcessId) + " (bound to KILL_ON_JOB_CLOSE job)");
 
-    DWORD start_tick = GetTickCount();
+    // Safe to lock down seb_keys.exe now: Chrome is already running and will not
+    // inherit policies applied after CreateProcessW.
+    lockdown_after_browser_launch(verbose);
+
+    const ULONGLONG start_tick = GetTickCount64();
     uint16_t port = 0;
     std::string ws_url;
-    while (GetTickCount() - start_tick < 15000) {
+    while (GetTickCount64() - start_tick < 15000) {
+        if (WaitForSingleObject(proc_h.get(), 0) == WAIT_OBJECT_0) {
+            DWORD exit_code = 0;
+            GetExitCodeProcess(proc_h.get(), &exit_code);
+            std::string hint;
+            if (exit_code == 0) {
+                hint = " (another Chrome instance may already hold this --user-data-dir)";
+            } else if (exit_code == 0xC0000022UL) {
+                hint = " (STATUS_ACCESS_DENIED - check Win32k/mitigation inheritance)";
+            } else if (exit_code == 0xC0000428UL) {
+                hint = " (STATUS_INVALID_IMAGE_HASH - check signature policy)";
+            }
+            throw std::runtime_error(
+                "Chrome exited before writing DevToolsActivePort (exit_code=" +
+                std::to_string(exit_code) + " / " + format_hex_u32(exit_code) + ")" + hint);
+        }
+
         try {
             if (seb::is_file_w(active_port_path.c_str())) {
                 auto bytes = nt::nt_read_file_bytes_w(active_port_path.c_str(), 65536);
@@ -1155,7 +1215,7 @@ inline void launch_cdp_browser(
 
     if (ws_url.empty()) {
         TerminateProcess(proc_h.get(), 1);
-        throw std::runtime_error("timed out waiting for Chrome CDP DevToolsActivePort");
+        throw std::runtime_error("timed out waiting for Chrome CDP DevToolsActivePort (browser still alive after 15s)");
     }
 
     vlog("chrome=" + win::wide_to_utf8(chrome) + " port=" + std::to_string(port));

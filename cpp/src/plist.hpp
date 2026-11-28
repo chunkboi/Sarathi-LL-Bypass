@@ -1,5 +1,6 @@
 #pragma once
 
+#include "num_parse.hpp"
 #include "win_crypto.hpp"
 
 #include <algorithm>
@@ -8,7 +9,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <stdexcept>
@@ -268,9 +268,8 @@ struct XmlParser {
                 while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) sv.remove_prefix(1);
                 while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back()))) sv.remove_suffix(1);
                 if (!sv.empty()) {
-                    const char* start_p = sv.data();
                     if (sv.front() == '+') sv.remove_prefix(1);
-                    start_p = sv.data();
+                    const char* start_p = sv.data();
                     auto [ptr, ec] = std::from_chars(start_p, start_p + sv.size(), val);
                     if (ec != std::errc{} || ptr != start_p + sv.size()) {
                         throw std::runtime_error("invalid plist integer");
@@ -287,12 +286,8 @@ struct XmlParser {
                 while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) sv.remove_prefix(1);
                 while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back()))) sv.remove_suffix(1);
                 if (!sv.empty()) {
-                    std::string tmp(sv);
-                    char* endp = nullptr;
-                    val = std::strtod(tmp.c_str(), &endp);
-                    if (endp != tmp.c_str() + tmp.size()) {
-                        throw std::runtime_error("invalid plist real");
-                    }
+                    if (sv.front() == '+') sv.remove_prefix(1);
+                    val = num::parse_double_strict(sv);
                 }
             }
             return PlistValue{val};

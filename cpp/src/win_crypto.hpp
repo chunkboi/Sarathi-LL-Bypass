@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
+#include <winver.h>
 
 #include <algorithm>
 #include <array>
@@ -19,7 +20,6 @@
 #include <cstring>
 #include <cwchar>
 #include <limits>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -405,13 +405,12 @@ inline std::string sha256_file_hex_w(const wchar_t* path, uint64_t known_size = 
     nt::NtHandle fh(nt::nt_open_read_file(path));
     if (!fh) return "";
 
-    if (known_size == UINT64_MAX) {
-        nt::FILE_STANDARD_INFORMATION fsi{};
-        nt::IO_STATUS_BLOCK iosb{};
-        if (nt::NtQueryInformationFile(fh.get(), &iosb, &fsi, sizeof(fsi), nt::FileStandardInformationClass) != 0) {
+if (known_size == UINT64_MAX) {
+        try {
+            known_size = nt::nt_file_size(fh.get());
+        } catch (...) {
             return "";
         }
-        known_size = static_cast<uint64_t>(fsi.EndOfFile.QuadPart);
         if (known_size == 0) {
             return "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         }
@@ -421,26 +420,23 @@ inline std::string sha256_file_hex_w(const wchar_t* path, uint64_t known_size = 
     NTSTATUS st = 0;
     if (known_size <= 262144ULL) {
         thread_local uint8_t buf[65536];
-        nt::IO_STATUS_BLOCK iosb{};
+        DWORD bytes_read = 0;
         bool first_read = true;
         while (true) {
-            const NTSTATUS read_st =
-                nt::NtReadFile(fh.get(), nullptr, nullptr, nullptr, &iosb, buf, sizeof(buf), nullptr, nullptr);
-            if (read_st != 0) {
-                st = read_st;
+            if (!ReadFile(fh.get(), buf, sizeof(buf), &bytes_read, nullptr)) {
+                st = -1;
                 break;
             }
-            if (iosb.Information == 0) break;  // EOF
+            if (bytes_read == 0) break;  // EOF
             if (first_read) {
                 first_read = false;
-                if (is_pe && iosb.Information >= 2) {
+                if (is_pe && bytes_read >= 2) {
                     *is_pe = (buf[0] == 'M' && buf[1] == 'Z');
                 }
             }
-            st = BCryptHashData(hHash, buf, static_cast<ULONG>(iosb.Information), 0);
+            st = BCryptHashData(hHash, buf, bytes_read, 0);
             if (st != 0) break;
-            // A short read means EOF; avoid the extra zero-length syscall.
-            if (iosb.Information < sizeof(buf)) break;
+            if (bytes_read < sizeof(buf)) break;
         }
     } else {
         try {
@@ -660,13 +656,11 @@ inline std::vector<std::wstring> reg_enum_subkeys(HKEY root, const wchar_t* subk
         nt::NtHandle fh(nt::nt_open_read_file(path));
         if (!fh) return {L"", ""};
         char mz[2]{};
-        nt::IO_STATUS_BLOCK iosb{};
-        if (nt::NtReadFile(fh.get(), nullptr, nullptr, nullptr, &iosb, mz, 2, nullptr, nullptr) != 0 ||
-            iosb.Information != 2 || mz[0] != 'M' || mz[1] != 'Z') {
+        DWORD got = 0;
+        if (!ReadFile(fh.get(), mz, 2, &got, nullptr) || got != 2 || mz[0] != 'M' || mz[1] != 'Z') {
             return {L"", ""};
         }
     }
-
     DWORD dummy = 0;
     DWORD size = GetFileVersionInfoSizeW(path, &dummy);
     if (!size) return {L"", ""};
@@ -938,10 +932,13 @@ inline std::string signer_thumbprint_w(const wchar_t* path) {
     append_u_pad(out, local_st.wMinute, 2); out.push_back(':');
     append_u_pad(out, local_st.wSecond, 2); out.push_back('.');
     append_u_pad(out, usec, 6);
-    out.push_back(sign);
-    append_u_pad(out, off_h, 2); out.push_back(':');
-    append_u_pad(out, off_m, 2);
-    if (local_off_sec == 0) out.push_back('Z');
+    if (local_off_sec == 0) {
+        out.push_back('Z');
+    } else {
+        out.push_back(sign);
+        append_u_pad(out, off_h, 2); out.push_back(':');
+        append_u_pad(out, off_m, 2);
+    }
     return out;
 }
 

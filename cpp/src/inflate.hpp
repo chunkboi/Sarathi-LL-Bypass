@@ -4,7 +4,6 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -195,7 +194,8 @@ namespace detail {
     BitReader br{data, len};
     std::vector<uint8_t> out;
     const size_t max_reserve = (len <= (SIZE_MAX - 4096) / 64) ? (len * 64 + 4096) : (64ULL * 1024 * 1024);
-    size_t init_cap = hint_size ? (std::min)(hint_size, max_reserve) : (std::min)(len * 3, max_reserve);
+    const size_t fallback_cap = (len <= max_reserve / 3) ? (len * 3) : max_reserve;
+    size_t init_cap = hint_size ? (std::min)(hint_size, max_reserve) : fallback_cap;
     if (init_cap > 64ULL * 1024 * 1024) init_cap = 64ULL * 1024 * 1024;
     out.reserve(init_cap);
 

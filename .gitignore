@@ -28,6 +28,8 @@ htmlcov/
 
 # Build and distribution artifacts
 build/
+cpp/build-*/
+cpp/out/
 dist/
 *.tar.gz
 *.whl
@@ -47,9 +49,13 @@ rust/target/
 .env.local
 *.env.*
 
-# IDE
+# IDE / Visual Studio
 .vscode/
 .idea/
+.vs/
+CMakeUserPresets.json
+*.user
+*.suo
 *.swp
 *.swo
 *.tmp
