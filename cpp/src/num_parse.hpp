@@ -1,28 +1,25 @@
 #pragma once
 
+#include <charconv>
 #include <cmath>
-#include <cstdlib>
 #include <stdexcept>
-#include <string>
 #include <string_view>
 
 namespace seb::num {
 
-// Portable strict floating-point parser.
-//
-// libstdc++ 11 only provides the integer std::from_chars overloads, so use
-// strtod for the double path. The caller supplies a single, already-trimmed
-// token; require full consumption and reject infinities/NaN.
+// Strict locale-independent floating-point parser via C++17/26 std::from_chars.
+// The caller supplies a single, already-trimmed token; requires full
+// consumption and rejects infinities/NaN.
 [[nodiscard]] inline double parse_double_strict(std::string_view token) {
     if (token.empty()) {
         throw std::runtime_error("invalid floating-point number");
     }
 
-    std::string text(token);
-    const char* begin = text.c_str();
-    char* end = nullptr;
-    const double value = std::strtod(begin, &end);
-    if (end != begin + text.size() || !std::isfinite(value)) {
+    double value = 0.0;
+    const char* const begin = token.data();
+    const char* const end = begin + token.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, value);
+    if (ec != std::errc{} || ptr != end || !std::isfinite(value)) {
         throw std::runtime_error("invalid or out-of-range floating-point number");
     }
     return value;
